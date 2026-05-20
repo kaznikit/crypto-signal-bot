@@ -13,8 +13,8 @@ from bot.analyzer.improvements import (
 from bot.analyzer.setup_machine import SetupEvent
 from bot.config import LiberalConfig, StrategyFeaturesConfig
 from bot.market.pivots import (
-    detect_pivots,
-    extract_structure_breaks,
+    detect_pivots_htf,
+    extract_structure_breaks_htf,
     latest_structure_break,
 )
 from bot.storage.models import Setup
@@ -39,10 +39,12 @@ def continuation_htf_aligned_with_4h(
     «направление последнего impulse leg» — Pine BOS уже даёт чистый сигнал
     «куда сейчас идёт структура».
     """
-    pivots = detect_pivots(df_4h, swing_size=swing_size)
+    pivots = detect_pivots_htf(df_4h, swing_size=swing_size, use_close=True, impulse_lock=True)
     if not pivots:
         return False
-    breaks = extract_structure_breaks(df_4h, swing_size=swing_size, use_close=True)
+    breaks = extract_structure_breaks_htf(
+        df_4h, swing_size=swing_size, use_close=True, impulse_lock=True
+    )
     last_break = latest_structure_break(breaks)
     if last_break is None:
         return False

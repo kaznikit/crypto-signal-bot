@@ -318,6 +318,271 @@ def latest_impulse_leg(
     return legs[-1] if legs else None
 
 
+@dataclass(slots=True, frozen=True)
+class ImpulseLockState:
+    """Фаза ретрейса после подтверждения пика импульса (HH / LL).
+
+    Пока цена между ``start_price`` и ``end_price`` без обновления границ,
+    внутренние пивоты и BOS/CHoCH не эмитятся — только после пробоя HL
+    (обновление минимума) или HH (обновление максимума) импульса.
+    """
+
+    leg: ImpulseLeg
+    lock_from_idx: int
+    broken_start_idx: int  # первый бар с пробоем start (−1 = ещё нет)
+    broken_end_idx: int  # первый бар с пробоем end (−1 = ещё нет)
+
+
+def first_impulse_boundary_break_idxs(
+    df: pd.DataFrame,
+    leg: ImpulseLeg,
+    *,
+    after_idx: int,
+    use_close: bool = True,
+) -> tuple[int, int]:
+    """Индексы первого пробоя ``start_price`` и ``end_price`` после ``after_idx``.
+
+    LONG: start = close/low < HL (как BOS при ``use_close``), end = close/high > HH.
+    SHORT: start = close/high > LH, end = close/low < LL.
+    Возвращает ``(-1, -1)``, если пробоев ещё не было.
+    """
+    last_idx = int(df.index[-1])
+    if after_idx >= last_idx:
+        return -1, -1
+    broken_start = -1
+    broken_end = -1
+    for idx in df.index[after_idx + 1 : last_idx + 1]:
+        i = int(idx)
+        if leg.direction == "LONG":
+            start_src = float(df.loc[i, "close"]) if use_close else float(df.loc[i, "low"])
+            if broken_start < 0 and start_src < leg.start_price:
+                broken_start = i
+            end_src = float(df.loc[i, "close"]) if use_close else float(df.loc[i, "high"])
+            if broken_end < 0 and end_src > leg.end_price:
+                broken_end = i
+        else:
+            start_src = float(df.loc[i, "close"]) if use_close else float(df.loc[i, "high"])
+            if broken_start < 0 and start_src > leg.start_price:
+                broken_start = i
+            end_src = float(df.loc[i, "close"]) if use_close else float(df.loc[i, "low"])
+            if broken_end < 0 and end_src < leg.end_price:
+                broken_end = i
+    return broken_start, broken_end
+
+
+def compute_impulse_lock_state(
+    df: pd.DataFrame,
+    pivots: list[Pivot],
+    *,
+    swing_size: int,
+    use_close: bool = True,
+) -> ImpulseLockState | None:
+    """Состояние HTF-lock для последнего импульса, если идёт ретрейс без пробоя границ.
+
+    ``None`` — lock не активен (импульс ещё строится, или обе границы уже обновлены).
+    """
+    leg = latest_impulse_leg(pivots)
+    if leg is None:
+        return None
+    lock_from_idx = leg.end_idx + swing_size
+    last_idx = int(df.index[-1])
+    if last_idx < lock_from_idx:
+        return None
+    broken_start, broken_end = first_impulse_boundary_break_idxs(
+        df, leg, after_idx=leg.end_idx, use_close=use_close
+    )
+    if broken_start >= 0 and broken_end >= 0:
+        return None
+    if broken_start < 0 and broken_end < 0:
+        return ImpulseLockState(
+            leg=leg,
+            lock_from_idx=lock_from_idx,
+            broken_start_idx=-1,
+            broken_end_idx=-1,
+        )
+    return ImpulseLockState(
+        leg=leg,
+        lock_from_idx=lock_from_idx,
+        broken_start_idx=broken_start,
+        broken_end_idx=broken_end,
+    )
+
+
+def impulse_leg_anchor_idxs(legs: list[ImpulseLeg]) -> set[int]:
+    """Бары HL/LH и HH/LL всех импульсных ног — всегда показываем на overlay."""
+    out: set[int] = set()
+    for leg in legs:
+        out.add(leg.start_idx)
+        out.add(leg.end_idx)
+    return out
+
+
+def impulse_leg_for_retracement_pivot(
+    pivot: Pivot,
+    legs: list[ImpulseLeg],
+) -> ImpulseLeg | None:
+    """Импульс, чей ретрейс после HH/LL содержит этот пивот.
+
+    Берём последнюю ногу с ``end_idx < pivot.idx`` в том же направлении,
+    что и тренд (LOW-пивот → LONG-импульсы). Иначе откат после 1-го HH
+    ошибочно сравнивают с HL уже 2-го импульса.
+    """
+    if pivot.kind == "LOW":
+        direction = "LONG"
+    elif pivot.kind == "HIGH":
+        direction = "SHORT"
+    else:
+        return None
+    candidates = [
+        leg for leg in legs if leg.direction == direction and leg.end_idx < pivot.idx
+    ]
+    return candidates[-1] if candidates else None
+
+
+def _reference_leg_for_pivot(
+    pivot: Pivot,
+    state: ImpulseLockState,
+    impulse_legs: list[ImpulseLeg],
+) -> ImpulseLeg:
+    ref = impulse_leg_for_retracement_pivot(pivot, impulse_legs)
+    return ref if ref is not None else state.leg
+
+
+def pivot_label_for_htf_display(
+    pivot: Pivot,
+    state: ImpulseLockState | None,
+    *,
+    impulse_legs: list[ImpulseLeg] | None = None,
+) -> str:
+    """Метка на графике: low выше HL импульса не может быть LL."""
+    if state is None:
+        return pivot.label
+    legs = impulse_legs or []
+    ref = impulse_leg_for_retracement_pivot(pivot, legs) or state.leg
+    if ref.direction == "LONG" and pivot.kind == "LOW" and pivot.price >= ref.start_price:
+        return "HL"
+    if ref.direction == "SHORT" and pivot.kind == "HIGH" and pivot.price <= ref.start_price:
+        return "LH"
+    return pivot.label
+
+
+def _pivot_allowed_under_impulse_lock(
+    pivot: Pivot,
+    state: ImpulseLockState,
+    *,
+    anchor_idxs: set[int],
+    impulse_legs: list[ImpulseLeg],
+) -> bool:
+    if pivot.idx in anchor_idxs:
+        return True
+    if pivot.idx <= state.leg.end_idx:
+        return True
+    ref = _reference_leg_for_pivot(pivot, state, impulse_legs)
+    if ref.direction == "LONG":
+        if pivot.kind == "LOW":
+            if pivot.price >= ref.start_price:
+                return True
+            return (
+                state.broken_start_idx >= 0 and pivot.idx >= state.broken_start_idx
+            )
+        if pivot.kind == "HIGH":
+            if state.broken_end_idx < 0 or pivot.idx < state.broken_end_idx:
+                return False
+            return pivot.price > ref.end_price
+    else:
+        if pivot.kind == "HIGH":
+            if pivot.price <= ref.start_price:
+                return True
+            return (
+                state.broken_start_idx >= 0 and pivot.idx >= state.broken_start_idx
+            )
+        if pivot.kind == "LOW":
+            if state.broken_end_idx < 0 or pivot.idx < state.broken_end_idx:
+                return False
+            return pivot.price < ref.end_price
+    return False
+
+
+def filter_pivots_by_impulse_lock(
+    pivots: list[Pivot],
+    state: ImpulseLockState | None,
+    *,
+    impulse_legs: list[ImpulseLeg] | None = None,
+) -> list[Pivot]:
+    if state is None:
+        return pivots
+    legs = impulse_legs if impulse_legs is not None else extract_impulse_legs(pivots)
+    anchors = impulse_leg_anchor_idxs(legs)
+    return [
+        p
+        for p in pivots
+        if _pivot_allowed_under_impulse_lock(
+            p, state, anchor_idxs=anchors, impulse_legs=legs
+        )
+    ]
+
+
+def _structure_break_allowed_under_impulse_lock(
+    br: StructureBreak,
+    state: ImpulseLockState,
+) -> bool:
+    if br.broken_idx <= state.leg.end_idx:
+        return True
+    if state.broken_start_idx < 0 and state.broken_end_idx < 0:
+        return False
+    opposite = "SHORT" if state.leg.direction == "LONG" else "LONG"
+    if br.direction == opposite:
+        return state.broken_start_idx >= 0 and br.broken_idx >= state.broken_start_idx
+    if br.direction == state.leg.direction:
+        return state.broken_end_idx >= 0 and br.broken_idx >= state.broken_end_idx
+    return False
+
+
+def filter_structure_breaks_by_impulse_lock(
+    breaks: list[StructureBreak],
+    state: ImpulseLockState | None,
+) -> list[StructureBreak]:
+    if state is None:
+        return breaks
+    return [b for b in breaks if _structure_break_allowed_under_impulse_lock(b, state)]
+
+
+def detect_pivots_htf(
+    df: pd.DataFrame,
+    swing_size: int,
+    *,
+    use_close: bool = True,
+    impulse_lock: bool = True,
+) -> list[Pivot]:
+    """Пивоты с опциональным HTF impulse-lock (ретрейс без внутреннего шума)."""
+    pivots = detect_pivots(df, swing_size=swing_size)
+    if not impulse_lock:
+        return pivots
+    legs = extract_impulse_legs(pivots)
+    state = compute_impulse_lock_state(
+        df, pivots, swing_size=swing_size, use_close=use_close
+    )
+    return filter_pivots_by_impulse_lock(pivots, state, impulse_legs=legs)
+
+
+def extract_structure_breaks_htf(
+    df: pd.DataFrame,
+    swing_size: int,
+    *,
+    use_close: bool = True,
+    impulse_lock: bool = True,
+) -> list[StructureBreak]:
+    """BOS/CHoCH с опциональным HTF impulse-lock."""
+    breaks = extract_structure_breaks(df, swing_size=swing_size, use_close=use_close)
+    if not impulse_lock:
+        return breaks
+    pivots = detect_pivots(df, swing_size=swing_size)
+    state = compute_impulse_lock_state(
+        df, pivots, swing_size=swing_size, use_close=use_close
+    )
+    return filter_structure_breaks_by_impulse_lock(breaks, state)
+
+
 def structure_break_key(
     htf: str,
     br: StructureBreak,

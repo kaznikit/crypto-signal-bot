@@ -4,9 +4,9 @@ from collections import Counter
 
 from bot.analyzer.setup_machine import SetupEvent, build_setup, make_setup_id
 from bot.market.pivots import (
-    detect_pivots,
+    detect_pivots_htf,
     extract_impulse_legs,
-    extract_structure_breaks,
+    extract_structure_breaks_htf,
     find_first_touch_idx,
     impulse_invalidated,
     latest_structure_break,
@@ -48,11 +48,15 @@ def detect_reversal_prepare(
     if len(htf_df) < 2:
         return None, None
 
-    pivots = detect_pivots(htf_df, swing_size=swing_size)
+    pivots = detect_pivots_htf(
+        htf_df, swing_size=swing_size, use_close=bos_use_close, impulse_lock=True
+    )
     if not pivots:
         return None, None
 
-    breaks = extract_structure_breaks(htf_df, swing_size=swing_size, use_close=bos_use_close)
+    breaks = extract_structure_breaks_htf(
+        htf_df, swing_size=swing_size, use_close=bos_use_close, impulse_lock=True
+    )
     if not breaks:
         _funnel_inc(funnel, "no_structure_breaks")
         return None, None

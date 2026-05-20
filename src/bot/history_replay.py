@@ -32,10 +32,15 @@ from bot.exchange.bybit_client import BybitClient
 from bot.market.candles import candles_to_df
 from bot.market.fibo import OteZone, is_price_in_zone
 from bot.market.pivots import (
+    _pivot_allowed_under_impulse_lock,
+    compute_impulse_lock_state,
     detect_pivots,
+    detect_pivots_htf,
     extract_impulse_legs,
-    extract_structure_breaks,
+    extract_structure_breaks_htf,
     impulse_invalidated,
+    impulse_leg_anchor_idxs,
+    pivot_label_for_htf_display,
 )
 
 logger = logging.getLogger(__name__)
@@ -170,28 +175,46 @@ def _emit_fresh_pivot_events(
     * **STRUCTURE** — BOS / CHoCH (первое close-пересечение активного
       prevHigh/prevLow). Эмитится мгновенно, без задержки на ``swing_size``.
     """
-    pivots = detect_pivots(df, swing_size=swing_size)
+    raw_pivots = detect_pivots(df, swing_size=swing_size)
+    pivots = detect_pivots_htf(
+        df, swing_size=swing_size, use_close=bos_use_close, impulse_lock=True
+    )
     if not pivots and len(df) < 2 * swing_size + 1:
         return
     last_pos = int(df.index[-1])
     confirm_idx = last_pos - swing_size
+    impulse_legs = extract_impulse_legs(raw_pivots)
+    lock_state = compute_impulse_lock_state(
+        df, raw_pivots, swing_size=swing_size, use_close=bos_use_close
+    )
 
-    for pivot in pivots:
+    for pivot in raw_pivots:
         if pivot.idx != confirm_idx:
             continue
+        if lock_state is not None:
+            anchors = impulse_leg_anchor_idxs(impulse_legs)
+            if not _pivot_allowed_under_impulse_lock(
+                pivot,
+                lock_state,
+                anchor_idxs=anchors,
+                impulse_legs=impulse_legs,
+            ):
+                continue
         events_out.append(
             {
                 "kind": "PIVOT",
                 "symbol": symbol,
                 "htf": htf,
-                "label": pivot.label,
+                "label": pivot_label_for_htf_display(
+                    pivot, lock_state, impulse_legs=impulse_legs
+                ),
                 "pivot_kind": pivot.kind,
                 "price": pivot.price,
                 "bar_open_ms": int(df.iloc[pivot.idx]["open_time"]),
             }
         )
 
-    for leg in extract_impulse_legs(pivots):
+    for leg in extract_impulse_legs(raw_pivots):
         if leg.end_idx != confirm_idx:
             continue
         events_out.append(
@@ -208,7 +231,9 @@ def _emit_fresh_pivot_events(
             }
         )
 
-    breaks = extract_structure_breaks(df, swing_size=swing_size, use_close=bos_use_close)
+    breaks = extract_structure_breaks_htf(
+        df, swing_size=swing_size, use_close=bos_use_close, impulse_lock=True
+    )
     for br in breaks:
         if br.broken_idx != last_pos:
             continue

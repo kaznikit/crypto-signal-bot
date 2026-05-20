@@ -9,7 +9,7 @@ from bot.market.pivots import (
     continuation_anchor_break,
     detect_pivots,
     extract_all_pivot_legs,
-    extract_structure_breaks,
+    extract_structure_breaks_htf,
     find_first_touch_idx,
     impulse_invalidated,
     latest_structure_break,
@@ -65,8 +65,8 @@ def detect_continuation_prepare(
 
     last_pos = int(htf_df.index[-1])
 
-    breaks = extract_structure_breaks(
-        htf_df, swing_size=swing_size, use_close=bos_use_close
+    breaks = extract_structure_breaks_htf(
+        htf_df, swing_size=swing_size, use_close=bos_use_close, impulse_lock=True
     )
     last_any = latest_structure_break(
         breaks,
@@ -150,11 +150,12 @@ def detect_continuation_prepare(
             continue
 
         cand_trigger = cand.fib_half if fib_level == 0.5 else _fib_at(cand, fib_level)
+        since_touch = max(cand.end_idx, last_break.broken_idx)
         touch_idx = find_first_touch_idx(
             htf_df,
             direction=cand.direction,
             level=cand_trigger,
-            since_idx=cand.end_idx,
+            since_idx=since_touch,
         )
         if touch_idx < 0:
             _funnel_inc(funnel, "no_touch_yet")
@@ -174,7 +175,7 @@ def detect_continuation_prepare(
             swing_size=swing_size,
             touch_direction=cand.direction,
             level=cand_trigger,
-            since_idx=cand.end_idx,
+            since_idx=since_touch,
         )
         if emission is None:
             continue

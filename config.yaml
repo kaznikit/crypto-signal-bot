@@ -16,7 +16,7 @@ pivots:
   swing_size_by_tf:
     "5M": 20
     "15M": 12
-    "1H": 8
+    "1H": 5
     "4H": 7
   bos_use_close: true
   impulse_max_age_bars: 120
