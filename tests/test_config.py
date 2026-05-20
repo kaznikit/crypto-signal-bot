@@ -1,0 +1,41 @@
+from bot.config import BotConfig, PREPARE_HTF_ORDER, load_bot_config
+from pathlib import Path
+
+
+def test_prepare_htfs_respects_config_order() -> None:
+    cfg = BotConfig.model_validate(
+        {
+            "exchange": {"name": "bybit", "category": "linear"},
+            "symbols": {},
+            "timeframes": ["1H", "4H", "15M"],
+            "reversal": {},
+            "continuation": {},
+            "filters": {},
+            "risk": {},
+            "telegram": {},
+            "paper_mode": {},
+        }
+    )
+    assert cfg.prepare_htfs() == PREPARE_HTF_ORDER
+
+
+def test_prepare_htfs_filters_unknown_and_empty() -> None:
+    cfg = BotConfig.model_validate(
+        {
+            "exchange": {"name": "bybit", "category": "linear"},
+            "symbols": {},
+            "timeframes": ["4H", "1H", "5M"],
+            "reversal": {},
+            "continuation": {},
+            "filters": {},
+            "risk": {},
+            "telegram": {},
+            "paper_mode": {},
+        }
+    )
+    assert cfg.prepare_htfs() == ("4H", "1H")
+
+
+def test_config_yaml_prepare_htfs() -> None:
+    cfg = load_bot_config(Path("config.yaml"))
+    assert cfg.prepare_htfs() == ("4H", "1H")

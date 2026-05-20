@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass, field
+from typing import Any
+
+from bot.analyzer.setup_machine import SetupEvent, build_setup, make_setup_id
+from bot.market.pivots import (
+    continuation_anchor_break,
+    detect_pivots,
+    extract_all_pivot_legs,
+    extract_structure_breaks,
+    find_first_touch_idx,
+    impulse_invalidated,
+    latest_structure_break,
+    prepare_emission_on_current_bar,
+    structure_break_key,
+)
+from bot.storage.models import Setup, SetupType
+
+
+@dataclass
+class ContinuationPrepareState:
+    """Состояние walk-forward replay: один PREPARE на BOS/CHoCH, lock направления."""
+
+    direction_lock_by_htf: dict[str, str] = field(default_factory=dict)
+    prepared_break_keys: set[tuple[str, int, int, str, str]] = field(
+        default_factory=set
+    )
+
+def _funnel_inc(funnel: Counter[str] | None, key: str) -> None:
+    if funnel is not None:
+        funnel[key] += 1
+
+
+def detect_continuation_prepare(
+    *,
+    symbol: str,
+    htf: str,
+    htf_df,
+    close_time: int,
+    swing_size: int,
+    fib_level: float = 0.5,
+    impulse_max_age_bars: int = 60,
+    bos_use_close: bool = True,
+    ttl_hours: int = 24,
+    funnel: Counter[str] | None = None,
+    structure_max_bars_ago: int = 30,
+    prepare_state: ContinuationPrepareState | None = None,
+    ltf_expected: str = "5M",
+) -> tuple[Setup | None, SetupEvent | None]:
+    """PREPARE-continuation: одно касание 0.5 на событие BOS/CHoCH.
+
+    1. **Lock направления** (``prepare_state``): сбрасывается при любом
+       противоположном BOS **или CHoCH** (иначе после CHoCH SHORT lock
+       остаётся LONG и PREPARE не строится).
+    2. Якорь = ``continuation_anchor_break`` — последний BOS/CHoCH в lock-
+       направлении **строго после** последнего противоположного пробоя.
+    3. Нога с ``end_idx >= broken_idx``; первая по времени нога с эмиссией
+       на текущем баре.
+    4. Не более одного PREPARE на ключ ``structure_break_key``.
+    """
+    if len(htf_df) < 2:
+        return None, None
+
+    last_pos = int(htf_df.index[-1])
+
+    breaks = extract_structure_breaks(
+        htf_df, swing_size=swing_size, use_close=bos_use_close
+    )
+    last_any = latest_structure_break(
+        breaks,
+        kinds=("BOS", "CHOCH"),
+        max_bars_ago=structure_max_bars_ago,
+        last_idx=last_pos,
+    )
+    if last_any is None:
+        _funnel_inc(funnel, "no_recent_structure_break")
+        return None, None
+
+    structure_direction = last_any.direction
+    if prepare_state is not None:
+        lock = prepare_state.direction_lock_by_htf.get(htf)
+        if lock is None:
+            prepare_state.direction_lock_by_htf[htf] = structure_direction
+            lock = structure_direction
+        elif last_any.direction != lock:
+            anchor_new = continuation_anchor_break(
+                breaks,
+                direction=last_any.direction,
+                last_idx=last_pos,
+                max_bars_ago=structure_max_bars_ago,
+            )
+            if last_any.kind == "BOS" or anchor_new is not None:
+                prepare_state.direction_lock_by_htf[htf] = last_any.direction
+                lock = last_any.direction
+                prepare_state.prepared_break_keys = {
+                    k for k in prepare_state.prepared_break_keys if k[0] != htf
+                }
+            else:
+                _funnel_inc(funnel, "opposite_structure_no_anchor_yet")
+        structure_direction = lock
+
+    last_break = continuation_anchor_break(
+        breaks,
+        direction=structure_direction,
+        last_idx=last_pos,
+        max_bars_ago=structure_max_bars_ago,
+    )
+    if last_break is None:
+        _funnel_inc(funnel, "no_anchor_break_after_opposite_structure")
+        return None, None
+
+    br_key = structure_break_key(htf, last_break, htf_df)
+    if prepare_state is not None and br_key in prepare_state.prepared_break_keys:
+        _funnel_inc(funnel, "prepare_already_emitted_for_break")
+        return None, None
+
+    pivots = detect_pivots(htf_df, swing_size=swing_size)
+    if not pivots:
+        return None, None
+
+    legs = extract_all_pivot_legs(pivots)
+    if not legs:
+        return None, None
+
+    impulse = None
+    trigger_level = 0.0
+    touch_idx = -1
+    for cand in legs:
+        if cand.direction != structure_direction:
+            _funnel_inc(funnel, "leg_direction_misaligned")
+            continue
+        if cand.end_idx < last_break.broken_idx:
+            _funnel_inc(funnel, "leg_before_structure_break")
+            continue
+        if last_pos - cand.end_idx > impulse_max_age_bars:
+            _funnel_inc(funnel, "leg_too_old")
+            break
+        if cand.end_idx >= last_pos:
+            _funnel_inc(funnel, "leg_peak_is_current_bar")
+            continue
+        if impulse_invalidated(
+            htf_df,
+            direction=cand.direction,
+            start_price=cand.start_price,
+            after_idx=cand.end_idx,
+        ):
+            _funnel_inc(funnel, "leg_invalidated")
+            continue
+
+        cand_trigger = cand.fib_half if fib_level == 0.5 else _fib_at(cand, fib_level)
+        touch_idx = find_first_touch_idx(
+            htf_df,
+            direction=cand.direction,
+            level=cand_trigger,
+            since_idx=cand.end_idx,
+        )
+        if touch_idx < 0:
+            _funnel_inc(funnel, "no_touch_yet")
+            continue
+
+        emission_bar = max(cand.end_idx + swing_size, touch_idx)
+        if emission_bar != last_pos:
+            if emission_bar < last_pos:
+                _funnel_inc(funnel, "emission_bar_in_past")
+            else:
+                _funnel_inc(funnel, "emission_bar_in_future")
+            continue
+
+        emission = prepare_emission_on_current_bar(
+            htf_df,
+            leg_end_idx=cand.end_idx,
+            swing_size=swing_size,
+            touch_direction=cand.direction,
+            level=cand_trigger,
+            since_idx=cand.end_idx,
+        )
+        if emission is None:
+            continue
+        _, touch_idx = emission
+        impulse = cand
+        trigger_level = cand_trigger
+        break
+
+    if impulse is None:
+        return None, None
+
+    if prepare_state is not None:
+        prepare_state.prepared_break_keys.add(br_key)
+
+    setup_id = make_setup_id(symbol, SetupType.CONTINUATION, htf, close_time)
+    start_open_ms = int(htf_df.iloc[impulse.start_idx]["open_time"])
+    end_open_ms = int(htf_df.iloc[impulse.end_idx]["open_time"])
+    touch_open_ms = int(htf_df.iloc[touch_idx]["open_time"])
+    setup = build_setup(
+        setup_id=setup_id,
+        symbol=symbol,
+        setup_type=SetupType.CONTINUATION,
+        direction=impulse.direction,
+        htf=htf,
+        ltf_expected=ltf_expected,
+        origin_price=trigger_level,
+        ote_low=trigger_level,
+        ote_high=trigger_level,
+        invalidation_price=impulse.start_price,
+        ttl_hours=ttl_hours,
+        phase="WAIT_CHOCH",
+        prepare_since_ms=touch_open_ms,
+    )
+    event = SetupEvent(
+        kind="PREPARE",
+        payload={
+            "setup_id": setup.id,
+            "symbol": symbol,
+            "type": SetupType.CONTINUATION.value,
+            "direction": impulse.direction,
+            "htf": htf,
+            "origin_price": trigger_level,
+            "ote_low": trigger_level,
+            "ote_high": trigger_level,
+            "prepare_trigger_level": trigger_level,
+            "prepare_trigger_fib": float(fib_level),
+            "impulse_start_price": impulse.start_price,
+            "impulse_end_price": impulse.end_price,
+            "invalidation_price": impulse.start_price,
+            "wait_for_ote_touch": False,
+            "structure_kind": last_break.kind,
+            "structure_level": last_break.swing_price,
+            "structure_swing_open_ms": int(
+                htf_df.iloc[last_break.swing_idx]["open_time"]
+            ),
+            "structure_broken_open_ms": int(
+                htf_df.iloc[last_break.broken_idx]["open_time"]
+            ),
+            "impulse_leg_start_open_ms": start_open_ms,
+            "impulse_leg_end_open_ms": end_open_ms,
+            "touch_open_ms": touch_open_ms,
+            "emission_bar_open_ms": int(htf_df.iloc[last_pos]["open_time"]),
+            "structure_break_key": br_key,
+        },
+    )
+    return setup, event
+
+
+def _fib_at(impulse: Any, fib: float) -> float:
+    if impulse.direction == "LONG":
+        return impulse.end_price - fib * (impulse.end_price - impulse.start_price)
+    return impulse.end_price + fib * (impulse.start_price - impulse.end_price)

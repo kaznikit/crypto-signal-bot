@@ -1,0 +1,70 @@
+from bot.history_replay import (
+    ClosedTrade,
+    OpenTrade,
+    _max_drawdown_r,
+    _resolve_trade_exit,
+    _summarize,
+)
+
+
+def test_resolve_trade_exit_long_tp_hit() -> None:
+    trade = OpenTrade(
+        setup_id="s1",
+        symbol="BTCUSDT",
+        setup_type="REVERSAL",
+        direction="LONG",
+        tf="15M",
+        entry_time=1,
+        entry=100.0,
+        sl=99.0,
+        tp=102.0,
+        risk=1.0,
+    )
+    hit, exit_price, r_mult, reason = _resolve_trade_exit(trade=trade, high=102.5, low=100.1)
+    assert hit is True
+    assert exit_price == 102.0
+    assert r_mult == 2.0
+    assert reason == "tp"
+
+
+def test_resolve_trade_exit_short_sl_hit() -> None:
+    trade = OpenTrade(
+        setup_id="s2",
+        symbol="ETHUSDT",
+        setup_type="CONTINUATION",
+        direction="SHORT",
+        tf="5M",
+        entry_time=1,
+        entry=100.0,
+        sl=101.0,
+        tp=98.0,
+        risk=1.0,
+    )
+    hit, exit_price, r_mult, reason = _resolve_trade_exit(trade=trade, high=101.2, low=99.9)
+    assert hit is True
+    assert exit_price == 101.0
+    assert r_mult == -1.0
+    assert reason == "sl"
+
+
+def test_max_drawdown_r() -> None:
+    trades = [
+        ClosedTrade("a", "BTCUSDT", "REVERSAL", "LONG", "15M", 1, 2, 100.0, 102.0, 2.0, "tp"),
+        ClosedTrade("b", "BTCUSDT", "REVERSAL", "LONG", "15M", 3, 4, 100.0, 99.0, -1.0, "sl"),
+        ClosedTrade("c", "BTCUSDT", "REVERSAL", "LONG", "15M", 5, 6, 100.0, 99.0, -1.0, "sl"),
+        ClosedTrade("d", "BTCUSDT", "REVERSAL", "LONG", "15M", 7, 8, 100.0, 102.0, 2.0, "tp"),
+    ]
+    assert _max_drawdown_r(trades) == 2.0
+
+
+def test_summarize_basic_metrics() -> None:
+    trades = [
+        ClosedTrade("a", "BTCUSDT", "REVERSAL", "LONG", "15M", 1, 2, 100.0, 102.0, 2.0, "tp"),
+        ClosedTrade("b", "BTCUSDT", "REVERSAL", "LONG", "15M", 3, 4, 100.0, 99.0, -1.0, "sl"),
+    ]
+    summary = _summarize(symbol="BTCUSDT", mode="both", closed_trades=trades)
+    assert summary.trades == 2
+    assert summary.wins == 1
+    assert summary.losses == 1
+    assert summary.winrate_pct == 50.0
+    assert summary.total_r == 1.0

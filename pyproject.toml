@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crypto-signal-bot"
+version = "0.1.0"
+description = "Bybit CHoCH/Fibonacci signal bot with Telegram notifications"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "aiogram>=3.7.0",
+  "apscheduler>=3.10.4",
+  "httpx>=0.27.0",
+  "pandas>=2.2.2",
+  "pydantic>=2.8.2",
+  "pydantic-settings>=2.3.4",
+  "pyyaml>=6.0.2",
+  "pybit>=5.8.0",
+  "python-dotenv>=1.0.1",
+  "smartmoneyconcepts>=0.0.26",
+  "sqlalchemy>=2.0.31",
+]
+
+[project.scripts]
+signal-bot-history = "bot.history_backtest:main"
+signal-bot-replay = "bot.history_replay:main"
+signal-bot-export-pine = "bot.export_pine:main"
+
+[tool.setuptools.package-data]
+bot = ["pine_data/*.tmpl"]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.11.1",
+  "pytest>=8.3.2",
+  "ruff>=0.5.7",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+ignore_missing_imports = true

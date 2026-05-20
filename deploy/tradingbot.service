@@ -1,0 +1,16 @@
+[Unit]
+Description=Crypto Signal Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tradingbot
+WorkingDirectory=/home/tradingbot/app
+EnvironmentFile=/home/tradingbot/app/.env
+ExecStart=/home/tradingbot/app/.venv/bin/python -m bot
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
