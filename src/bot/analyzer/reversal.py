@@ -4,13 +4,16 @@ from collections import Counter
 
 from bot.analyzer.setup_machine import SetupEvent, build_setup, make_setup_id
 from bot.market.pivots import (
+    detect_pivots,
     detect_pivots_htf,
     extract_impulse_legs,
     extract_structure_breaks_htf,
     find_first_touch_idx,
     impulse_invalidated,
-    latest_structure_break,
+    latest_choch_break,
     prepare_emission_on_current_bar,
+    prepare_suppressed_after_trend_flip,
+    prepare_suppressed_during_impulse_lock,
 )
 from bot.storage.models import Setup, SetupType
 
@@ -62,9 +65,13 @@ def detect_reversal_prepare(
         return None, None
 
     last_pos = int(htf_df.index[-1])
-    choch_break = latest_structure_break(
+    raw_pivots = detect_pivots(htf_df, swing_size=swing_size)
+    choch_break = latest_choch_break(
         breaks,
-        kinds=("CHOCH",),
+        htf_df,
+        raw_pivots,
+        swing_size=swing_size,
+        use_close=bos_use_close,
         max_bars_ago=max_bars_ago_choch,
         last_idx=last_pos,
     )
@@ -73,6 +80,25 @@ def detect_reversal_prepare(
         return None, None
 
     setup_direction = choch_break.direction
+    if prepare_suppressed_during_impulse_lock(
+        htf_df,
+        raw_pivots,
+        swing_size=swing_size,
+        use_close=bos_use_close,
+        setup_direction=setup_direction,
+    ):
+        _funnel_inc(funnel, "prepare_suppressed_impulse_lock_retracement")
+        return None, None
+    if prepare_suppressed_after_trend_flip(
+        df=htf_df,
+        raw_pivots=raw_pivots,
+        swing_size=swing_size,
+        use_close=bos_use_close,
+        setup_direction=setup_direction,
+        last_pos=last_pos,
+    ):
+        _funnel_inc(funnel, "prepare_wait_correction_pivot_after_choch")
+        return None, None
     reversed_impulse_direction = "SHORT" if setup_direction == "LONG" else "LONG"
 
     legs = [
@@ -105,11 +131,12 @@ def detect_reversal_prepare(
     trigger_level = impulse.fib_half
     touch_direction = "SHORT" if setup_direction == "LONG" else "LONG"
 
+    since_touch = max(impulse.end_idx, choch_break.broken_idx)
     touch_idx = find_first_touch_idx(
         htf_df,
         direction=touch_direction,
         level=trigger_level,
-        since_idx=impulse.end_idx,
+        since_idx=since_touch,
     )
     if touch_idx < 0:
         _funnel_inc(funnel, "no_touch_yet")
@@ -129,7 +156,7 @@ def detect_reversal_prepare(
         swing_size=swing_size,
         touch_direction=touch_direction,
         level=trigger_level,
-        since_idx=impulse.end_idx,
+        since_idx=since_touch,
     )
     if emission is None:
         return None, None

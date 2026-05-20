@@ -255,6 +255,10 @@ def extract_structure_breaks(
 
     prev_high: float | None = None
     prev_low: float | None = None
+    prev_high_label: str | None = None
+    prev_low_label: str | None = None
+    last_high_pivot: float | None = None
+    last_low_pivot: float | None = None
     prev_high_idx = -1
     prev_low_idx = -1
     high_active = False
@@ -267,17 +271,29 @@ def extract_structure_breaks(
         if cand >= swing_size:
             window_hi = highs[cand - swing_size : cand + swing_size + 1]
             if math.isfinite(float(highs[cand])) and float(highs[cand]) == window_hi.max():
-                prev_high = float(highs[cand])
+                price = float(highs[cand])
+                prev_high_label = (
+                    "HH" if (last_high_pivot is None or price >= last_high_pivot) else "LH"
+                )
+                last_high_pivot = price
+                prev_high = price
                 prev_high_idx = cand
                 high_active = True
             window_lo = lows[cand - swing_size : cand + swing_size + 1]
             if math.isfinite(float(lows[cand])) and float(lows[cand]) == window_lo.min():
-                prev_low = float(lows[cand])
+                price = float(lows[cand])
+                prev_low_label = (
+                    "HL" if (last_low_pivot is None or price >= last_low_pivot) else "LL"
+                )
+                last_low_pivot = price
+                prev_low = price
                 prev_low_idx = cand
                 low_active = True
 
         if high_active and prev_high is not None and float(src_hi[i]) > prev_high:
             kind = "CHOCH" if prev_break_dir == -1 else "BOS"
+            if prev_high_label == "LH":
+                kind = "CHOCH"
             breaks.append(
                 StructureBreak(
                     direction="LONG",
@@ -291,6 +307,8 @@ def extract_structure_breaks(
             prev_break_dir = 1
         if low_active and prev_low is not None and float(src_lo[i]) < prev_low:
             kind = "CHOCH" if prev_break_dir == 1 else "BOS"
+            if prev_low_label == "HL":
+                kind = "CHOCH"
             breaks.append(
                 StructureBreak(
                     direction="SHORT",
@@ -457,6 +475,12 @@ def pivot_label_for_htf_display(
     """Метка на графике: low выше HL импульса не может быть LL."""
     if state is None:
         return pivot.label
+    # После слома HL/LH — новая структура, не перекрашиваем low/high старым импульсом.
+    if state.broken_start_idx >= 0:
+        if state.leg.direction == "LONG" and pivot.kind == "LOW" and pivot.idx >= state.broken_start_idx:
+            return pivot.label
+        if state.leg.direction == "SHORT" and pivot.kind == "HIGH" and pivot.idx >= state.broken_start_idx:
+            return pivot.label
     legs = impulse_legs or []
     ref = impulse_leg_for_retracement_pivot(pivot, legs) or state.leg
     if ref.direction == "LONG" and pivot.kind == "LOW" and pivot.price >= ref.start_price:
@@ -486,6 +510,13 @@ def _pivot_allowed_under_impulse_lock(
                 state.broken_start_idx >= 0 and pivot.idx >= state.broken_start_idx
             )
         if pivot.kind == "HIGH":
+            # После слома HL — коррекционные LH (high ниже HH).
+            if (
+                state.broken_start_idx >= 0
+                and pivot.idx >= state.broken_start_idx
+                and pivot.price < ref.end_price
+            ):
+                return True
             if state.broken_end_idx < 0 or pivot.idx < state.broken_end_idx:
                 return False
             return pivot.price > ref.end_price
@@ -497,6 +528,12 @@ def _pivot_allowed_under_impulse_lock(
                 state.broken_start_idx >= 0 and pivot.idx >= state.broken_start_idx
             )
         if pivot.kind == "LOW":
+            if (
+                state.broken_start_idx >= 0
+                and pivot.idx >= state.broken_start_idx
+                and pivot.price > ref.end_price
+            ):
+                return True
             if state.broken_end_idx < 0 or pivot.idx < state.broken_end_idx:
                 return False
             return pivot.price < ref.end_price
@@ -528,9 +565,16 @@ def _structure_break_allowed_under_impulse_lock(
 ) -> bool:
     if br.broken_idx <= state.leg.end_idx:
         return True
-    if state.broken_start_idx < 0 and state.broken_end_idx < 0:
-        return False
     opposite = "SHORT" if state.leg.direction == "LONG" else "LONG"
+    if state.broken_start_idx < 0 and state.broken_end_idx < 0:
+        # Во время ретрейса после импульса разрешаем только явный CHOCH по
+        # ближайшему коррекционному HL/LH (свинг после пика импульса), чтобы
+        # не пропускать смену тренда до пробоя стартового HL/LH импульса.
+        if br.direction == opposite and br.kind == "CHOCH" and br.swing_idx > state.leg.end_idx:
+            if state.leg.direction == "LONG":
+                return br.swing_price > state.leg.start_price
+            return br.swing_price < state.leg.start_price
+        return False
     if br.direction == opposite:
         return state.broken_start_idx >= 0 and br.broken_idx >= state.broken_start_idx
     if br.direction == state.leg.direction:
@@ -545,6 +589,183 @@ def filter_structure_breaks_by_impulse_lock(
     if state is None:
         return breaks
     return [b for b in breaks if _structure_break_allowed_under_impulse_lock(b, state)]
+
+
+def impulse_invalidation_structure_break(
+    state: ImpulseLockState | None,
+) -> StructureBreak | None:
+    """Синтетический CHoCH на баре пробоя HL/LH импульса."""
+    if state is None or state.broken_start_idx < 0:
+        return None
+    leg = state.leg
+    choch_dir = "SHORT" if leg.direction == "LONG" else "LONG"
+    return StructureBreak(
+        direction=choch_dir,
+        kind="CHOCH",
+        swing_idx=leg.start_idx,
+        swing_price=leg.start_price,
+        broken_idx=state.broken_start_idx,
+    )
+
+
+def apply_impulse_invalidation_choch(
+    breaks: list[StructureBreak],
+    state: ImpulseLockState | None,
+) -> list[StructureBreak]:
+    """Пробой HL/LH импульса = CHoCH на уровне ``start`` импульса, не BOS по внутреннему low."""
+    if state is None or state.broken_start_idx < 0:
+        return breaks
+    leg = state.leg
+    inv = state.broken_start_idx
+    choch_dir = "SHORT" if leg.direction == "LONG" else "LONG"
+    choch = impulse_invalidation_structure_break(state)
+    assert choch is not None
+    # Убираем все SHORT-пробои в окне ретрейса до/на inv — иначе reclassify
+    # превратит наш CHoCH в BOS.
+    kept = [
+        b
+        for b in breaks
+        if not (
+            b.direction == choch_dir
+            and state.lock_from_idx <= b.broken_idx <= inv
+        )
+    ]
+    kept.append(choch)
+    kept.sort(key=lambda b: (b.broken_idx, b.swing_idx))
+    return kept
+
+
+def reclassify_structure_break_kinds(
+    breaks: list[StructureBreak],
+) -> list[StructureBreak]:
+    """Пересчёт BOS/CHoCH только по **видимым** пробоям (после impulse-lock).
+
+    Скрытые внутренние пробои не должны сдвигать ``prev_break_dir``, иначе
+    первый пробой HL после LONG-импульса ошибочно становится BOS SHORT.
+    """
+    prev_dir = 0
+    out: list[StructureBreak] = []
+    for br in breaks:
+        if br.direction == "LONG":
+            kind = "CHOCH" if prev_dir == -1 else "BOS"
+            prev_dir = 1
+        else:
+            kind = "CHOCH" if prev_dir == 1 else "BOS"
+            prev_dir = -1
+        if kind == br.kind:
+            out.append(br)
+        else:
+            out.append(
+                StructureBreak(
+                    direction=br.direction,
+                    kind=kind,
+                    swing_idx=br.swing_idx,
+                    swing_price=br.swing_price,
+                    broken_idx=br.broken_idx,
+                )
+            )
+    return out
+
+
+def first_correction_pivot_confirm_idx(
+    pivots: list[Pivot],
+    *,
+    invalidation_idx: int,
+    new_trend_direction: str,
+    swing_size: int,
+) -> int:
+    """Бар подтверждения первого LH (после слома HL) или HL (после слома LH)."""
+    want_kind = "HIGH" if new_trend_direction == "SHORT" else "LOW"
+    for p in pivots:
+        if p.idx <= invalidation_idx or p.kind != want_kind:
+            continue
+        return p.idx + swing_size
+    return -1
+
+
+def prepare_suppressed_after_trend_flip(
+    *,
+    df: pd.DataFrame,
+    raw_pivots: list[Pivot],
+    swing_size: int,
+    use_close: bool,
+    setup_direction: str,
+    last_pos: int,
+) -> bool:
+    """Блок PREPARE в новую сторону до LH/HL и на баре подтверждения LH/HL.
+
+    Решает: P SHORT на отскоке (reversal/continuation по 0.5 старого импульса)
+    вместо метки LH на пике.
+    """
+    state = compute_impulse_lock_state(
+        df, raw_pivots, swing_size=swing_size, use_close=use_close
+    )
+    if state is None or state.broken_start_idx < 0:
+        return False
+    new_dir = "SHORT" if state.leg.direction == "LONG" else "LONG"
+    if setup_direction != new_dir:
+        return False
+    confirm = first_correction_pivot_confirm_idx(
+        raw_pivots,
+        invalidation_idx=state.broken_start_idx,
+        new_trend_direction=new_dir,
+        swing_size=swing_size,
+    )
+    if confirm < 0:
+        return True
+    return last_pos <= confirm
+
+
+def latest_choch_break(
+    breaks: list[StructureBreak],
+    df: pd.DataFrame,
+    pivots: list[Pivot],
+    *,
+    swing_size: int,
+    use_close: bool,
+    max_bars_ago: int | None,
+    last_idx: int | None,
+) -> StructureBreak | None:
+    """Последний CHoCH, включая синтетический при пробое HL/LH импульса."""
+    choch = latest_structure_break(
+        breaks,
+        kinds=("CHOCH",),
+        max_bars_ago=max_bars_ago,
+        last_idx=last_idx,
+    )
+    if choch is not None:
+        return choch
+    state = compute_impulse_lock_state(
+        df, pivots, swing_size=swing_size, use_close=use_close
+    )
+    inv = impulse_invalidation_structure_break(state)
+    if inv is None:
+        return None
+    if max_bars_ago is not None and last_idx is not None:
+        if (last_idx - inv.broken_idx) > max_bars_ago:
+            return None
+    return inv
+
+
+def prepare_suppressed_during_impulse_lock(
+    df: pd.DataFrame,
+    raw_pivots: list[Pivot],
+    *,
+    swing_size: int,
+    use_close: bool,
+    setup_direction: str,
+) -> bool:
+    """Блокируем контртрендовый PREPARE в ретрейсе импульса (P SHORT до слома HL)."""
+    state = compute_impulse_lock_state(
+        df, raw_pivots, swing_size=swing_size, use_close=use_close
+    )
+    if state is None:
+        return False
+    if state.broken_start_idx >= 0:
+        return False
+    if state.broken_end_idx >= 0:
+        return False
+    return setup_direction != state.leg.direction
 
 
 def detect_pivots_htf(
@@ -580,7 +801,10 @@ def extract_structure_breaks_htf(
     state = compute_impulse_lock_state(
         df, pivots, swing_size=swing_size, use_close=use_close
     )
-    return filter_structure_breaks_by_impulse_lock(breaks, state)
+    if state is None:
+        return breaks
+    filtered = filter_structure_breaks_by_impulse_lock(breaks, state)
+    return apply_impulse_invalidation_choch(filtered, state)
 
 
 def structure_break_key(

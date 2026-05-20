@@ -8,12 +8,14 @@ from bot.analyzer.setup_machine import SetupEvent, build_setup, make_setup_id
 from bot.market.pivots import (
     continuation_anchor_break,
     detect_pivots,
-    extract_all_pivot_legs,
+    extract_impulse_legs,
     extract_structure_breaks_htf,
     find_first_touch_idx,
     impulse_invalidated,
     latest_structure_break,
     prepare_emission_on_current_bar,
+    prepare_suppressed_after_trend_flip,
+    prepare_suppressed_during_impulse_lock,
     structure_break_key,
 )
 from bot.storage.models import Setup, SetupType
@@ -111,16 +113,39 @@ def detect_continuation_prepare(
         _funnel_inc(funnel, "no_anchor_break_after_opposite_structure")
         return None, None
 
+    raw_pivots = detect_pivots(htf_df, swing_size=swing_size)
+    if prepare_suppressed_during_impulse_lock(
+        htf_df,
+        raw_pivots,
+        swing_size=swing_size,
+        use_close=bos_use_close,
+        setup_direction=structure_direction,
+    ):
+        _funnel_inc(funnel, "prepare_suppressed_impulse_lock_retracement")
+        return None, None
+    if prepare_suppressed_after_trend_flip(
+        df=htf_df,
+        raw_pivots=raw_pivots,
+        swing_size=swing_size,
+        use_close=bos_use_close,
+        setup_direction=structure_direction,
+        last_pos=last_pos,
+    ):
+        _funnel_inc(funnel, "prepare_wait_correction_pivot_after_choch")
+        return None, None
+
     br_key = structure_break_key(htf, last_break, htf_df)
     if prepare_state is not None and br_key in prepare_state.prepared_break_keys:
         _funnel_inc(funnel, "prepare_already_emitted_for_break")
         return None, None
 
-    pivots = detect_pivots(htf_df, swing_size=swing_size)
-    if not pivots:
+    if not raw_pivots:
         return None, None
 
-    legs = extract_all_pivot_legs(pivots)
+    # Только настоящие импульсные ноги HL→HH (LONG) / LH→LL (SHORT). Pine-эталон
+    # рисует P/0.5-линию ровно для них. Любые HIGH↔LOW (например HH→первый
+    # новый low после CHOCH) дают ложный P SHORT до подтверждения LH.
+    legs = extract_impulse_legs(raw_pivots)
     if not legs:
         return None, None
 
