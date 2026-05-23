@@ -11,6 +11,7 @@ import pandas as pd
 from bot.market.pivots import (
     ImpulseLeg,
     Pivot,
+    StructureBreak,
     continuation_anchor_break,
     detect_ltf_choch,
     detect_ltf_entry_confirm,
@@ -21,6 +22,7 @@ from bot.market.pivots import (
     first_touch_of_level_since,
     impulse_invalidated,
     latest_structure_break,
+    opposite_structure_break_since_open_ms,
     prepare_emission_on_current_bar,
 )
 
@@ -318,3 +320,36 @@ def test_detect_ltf_choch_returns_recent_choch_only() -> None:
         return
     assert choch.direction in {"LONG", "SHORT"}
     assert choch.bars_ago <= 10
+
+
+def test_opposite_structure_break_since_open_ms_filters_by_direction_and_time() -> None:
+    df = _df([100.0 + i for i in range(20)], spread=0.1)
+    breaks = [
+        StructureBreak("LONG", "BOS", 2, 102.0, 4),
+        StructureBreak("SHORT", "CHOCH", 5, 99.0, 8),
+        StructureBreak("SHORT", "BOS", 9, 98.0, 12),
+        StructureBreak("LONG", "CHOCH", 13, 105.0, 15),
+    ]
+    # LONG setup -> opposite SHORT, после open_time бара 9 (>= idx=9)
+    since = int(df.iloc[9]["open_time"])
+    opp_long = opposite_structure_break_since_open_ms(
+        breaks, df, setup_direction="LONG", since_open_ms=since
+    )
+    assert opp_long is not None
+    assert opp_long.direction == "SHORT"
+    assert opp_long.broken_idx == 12
+
+    # SHORT setup -> opposite LONG после open_time бара 14
+    since_short = int(df.iloc[14]["open_time"])
+    opp_short = opposite_structure_break_since_open_ms(
+        breaks, df, setup_direction="SHORT", since_open_ms=since_short
+    )
+    assert opp_short is not None
+    assert opp_short.direction == "LONG"
+    assert opp_short.broken_idx == 15
+
+    # Если после since нет противоположных пробоев -> None
+    none_after = opposite_structure_break_since_open_ms(
+        breaks, df, setup_direction="LONG", since_open_ms=int(df.iloc[13]["open_time"])
+    )
+    assert none_after is None

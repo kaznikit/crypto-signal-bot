@@ -28,7 +28,17 @@ f_dir_col(dir) =>
 if barstate.islast
     tf_ms = int(timeframe.in_seconds() * 1000)
     n = array.size(sig_t)
-    for i = 0 to n - 1
+    n := math.min(n, array.size(sig_t2))
+    n := math.min(n, array.size(sig_price))
+    n := math.min(n, array.size(sig_kind))
+    n := math.min(n, array.size(sig_subkind))
+    n := math.min(n, array.size(sig_dir))
+    n := math.min(n, array.size(sig_ote_lo))
+    n := math.min(n, array.size(sig_ote_hi))
+    n := math.min(n, array.size(sig_sl))
+    n := math.min(n, array.size(sig_tp))
+    last_i = n > 0 ? n - 1 : na
+    for i = 0 to last_i
         t_ms = array.get(sig_t, i)
         t2_ms = array.get(sig_t2, i)
         k = array.get(sig_kind, i)
@@ -46,6 +56,11 @@ if barstate.islast
             // смотрит LTF-паттерн на вход и решает сам.
             prep_style = d == "LONG" ? label.style_label_up : label.style_label_down
             label.new(t_ms, p, text="P " + d, xloc=xloc.bar_time, style=prep_style, color=col, textcolor=color.white, size=size.small)
+            // Структурная подсказка на баре отката к 0.5:
+            // SHORT -> LH, LONG -> HL.
+            corr_txt = d == "SHORT" ? "LH" : "HL"
+            corr_style = d == "SHORT" ? label.style_label_down : label.style_label_up
+            label.new(t_ms + tf_ms / 4, p, text=corr_txt, xloc=xloc.bar_time, style=corr_style, color=color.new(color.gray, 80), textcolor=color.white, size=size.tiny)
         else if k == "ENTRY"
             label.new(t_ms, p, text="E " + d, xloc=xloc.bar_time, style=label.style_label_down, color=color.new(col, 20), textcolor=color.white, size=size.normal)
             if not na(sl)

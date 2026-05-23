@@ -51,12 +51,11 @@ def detect_continuation_prepare(
     prepare_state: ContinuationPrepareState | None = None,
     ltf_expected: str = "5M",
 ) -> tuple[Setup | None, SetupEvent | None]:
-    """PREPARE-continuation: одно касание 0.5 на событие BOS/CHoCH.
+    """PREPARE-continuation: одно касание 0.5 на событие BOS.
 
-    1. **Lock направления** (``prepare_state``): сбрасывается при любом
-       противоположном BOS **или CHoCH** (иначе после CHoCH SHORT lock
-       остаётся LONG и PREPARE не строится).
-    2. Якорь = ``continuation_anchor_break`` — последний BOS/CHoCH в lock-
+    1. **Lock направления** (``prepare_state``): сбрасывается при
+       противоположном BOS.
+    2. Якорь = ``continuation_anchor_break`` — последний BOS в lock-
        направлении **строго после** последнего противоположного пробоя.
     3. Нога с ``end_idx >= broken_idx``; первая по времени нога с эмиссией
        на текущем баре.
@@ -70,9 +69,10 @@ def detect_continuation_prepare(
     breaks = extract_structure_breaks_htf(
         htf_df, swing_size=swing_size, use_close=bos_use_close, impulse_lock=True
     )
+    anchor_kinds: tuple[str, ...] = ("BOS",)
     last_any = latest_structure_break(
         breaks,
-        kinds=("BOS", "CHOCH"),
+        kinds=anchor_kinds,
         max_bars_ago=structure_max_bars_ago,
         last_idx=last_pos,
     )
@@ -92,6 +92,7 @@ def detect_continuation_prepare(
                 direction=last_any.direction,
                 last_idx=last_pos,
                 max_bars_ago=structure_max_bars_ago,
+                kinds=anchor_kinds,
             )
             if last_any.kind == "BOS" or anchor_new is not None:
                 prepare_state.direction_lock_by_htf[htf] = last_any.direction
@@ -108,6 +109,7 @@ def detect_continuation_prepare(
         direction=structure_direction,
         last_idx=last_pos,
         max_bars_ago=structure_max_bars_ago,
+        kinds=anchor_kinds,
     )
     if last_break is None:
         _funnel_inc(funnel, "no_anchor_break_after_opposite_structure")

@@ -475,6 +475,30 @@ def pivot_label_for_htf_display(
     """Метка на графике: low выше HL импульса не может быть LL."""
     if state is None:
         return pivot.label
+    # Экстремум текущей SHORT-импульсной ноги должен отображаться как LL.
+    # Это устраняет кейс, когда LL на конце short-ноги визуально становился HL.
+    if pivot.idx == state.leg.end_idx:
+        if state.leg.direction == "SHORT" and pivot.kind == "LOW":
+            return "LL"
+    # После подтверждённого пробоя end-уровня импульса (BOS по направлению ноги)
+    # low/high противоположного типа не должны перекрашиваться «старой» ногой.
+    # Иначе в SHORT-режиме low ниже LL-экстремума иногда остаётся HL.
+    if state.leg.direction == "SHORT" and pivot.kind == "LOW" and pivot.idx > state.leg.end_idx:
+        if (
+            state.broken_end_idx >= 0
+            and pivot.idx >= state.broken_end_idx
+            and pivot.price <= state.leg.end_price
+        ):
+            return "LL"
+        return pivot.label
+    if state.leg.direction == "LONG" and pivot.kind == "HIGH" and pivot.idx > state.leg.end_idx:
+        if (
+            state.broken_end_idx >= 0
+            and pivot.idx >= state.broken_end_idx
+            and pivot.price >= state.leg.end_price
+        ):
+            return "HH"
+        return pivot.label
     # После слома HL/LH — новая структура, не перекрашиваем low/high старым импульсом.
     if state.broken_start_idx >= 0:
         if state.leg.direction == "LONG" and pivot.kind == "LOW" and pivot.idx >= state.broken_start_idx:
@@ -849,6 +873,33 @@ def latest_structure_break(
         if not filtered:
             return None
     return filtered[-1]
+
+
+def opposite_structure_break_since_open_ms(
+    breaks: list[StructureBreak],
+    df: pd.DataFrame,
+    *,
+    setup_direction: str,
+    since_open_ms: int,
+    kinds: tuple[str, ...] = ("BOS", "CHOCH"),
+) -> StructureBreak | None:
+    """Последний противоположный BOS/CHoCH после ``since_open_ms``.
+
+    Используется для инвалидации ARMED-сетапа: если после PREPARE на его HTF
+    пришла структура в противоположную сторону, вход в старом направлении
+    запрещаем.
+    """
+    opposite = "SHORT" if setup_direction == "LONG" else "LONG"
+    for br in reversed(breaks):
+        if br.kind not in kinds or br.direction != opposite:
+            continue
+        try:
+            broken_open_ms = int(df.iloc[br.broken_idx]["open_time"])
+        except (KeyError, IndexError):
+            continue
+        if broken_open_ms >= since_open_ms:
+            return br
+    return None
 
 
 def continuation_anchor_break(

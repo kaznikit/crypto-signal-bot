@@ -17,6 +17,7 @@ from bot.analyzer.entry_ltf import (
     finest_closed_ltf,
     invalidation_tf_for_setup,
     ltf_expected_for_htf,
+    prepare_since_open_ms,
     try_entry_confirm,
 )
 from bot.analyzer.filters import atr_percent, close_beyond_level, finalize_entry_levels
@@ -40,6 +41,7 @@ from bot.market.pivots import (
     extract_structure_breaks_htf,
     impulse_invalidated,
     impulse_leg_anchor_idxs,
+    opposite_structure_break_since_open_ms,
     pivot_label_for_htf_display,
 )
 
@@ -777,6 +779,7 @@ async def run_history_replay(
                         }
                     )
 
+        htf_breaks_cache: dict[str, list[Any]] = {}
         for setup in setups:
             if setup.state != "ARMED":
                 continue
@@ -784,6 +787,30 @@ async def run_history_replay(
                 setup.state = "EXPIRED"
                 funnel["setup_expired"] += 1
                 continue
+
+            htf_df = series.get(setup.htf)
+            if htf_df is not None and not htf_df.empty:
+                breaks = htf_breaks_cache.get(setup.htf)
+                if breaks is None:
+                    swing = _swing_size_for_htf(cfg, setup.htf)
+                    breaks = extract_structure_breaks_htf(
+                        htf_df,
+                        swing_size=swing,
+                        use_close=cfg.pivots.bos_use_close,
+                        impulse_lock=True,
+                    )
+                    htf_breaks_cache[setup.htf] = breaks
+                opposite = opposite_structure_break_since_open_ms(
+                    breaks,
+                    htf_df,
+                    setup_direction=setup.direction,
+                    since_open_ms=prepare_since_open_ms(setup),
+                )
+                if opposite is not None:
+                    setup.state = "INVALIDATED"
+                    funnel["setup_invalidated_by_opposite_structure"] += 1
+                    funnel[f"setup_invalidated_by_opposite_structure_{setup.htf.lower()}"] += 1
+                    continue
 
             series_keys = set(series.keys())
             inv_tf = invalidation_tf_for_setup(

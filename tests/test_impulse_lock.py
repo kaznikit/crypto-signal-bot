@@ -465,6 +465,28 @@ def test_pivot_label_relabels_false_ll_above_hl() -> None:
     assert pivot_label_for_htf_display(p, lock) == "HL"
 
 
+def test_pivot_label_marks_ll_after_short_bos_when_new_low_breaks_ll() -> None:
+    lock = ImpulseLockState(
+        leg=ImpulseLeg("SHORT", 884, 5.208, 887, 4.739),
+        lock_from_idx=892,
+        broken_start_idx=-1,
+        broken_end_idx=903,
+    )
+    p = Pivot(idx=923, kind="LOW", price=4.618, label="HL")
+    assert pivot_label_for_htf_display(p, lock) == "LL"
+
+
+def test_pivot_label_keeps_short_leg_end_as_ll() -> None:
+    lock = ImpulseLockState(
+        leg=ImpulseLeg("SHORT", 884, 5.208, 887, 4.739),
+        lock_from_idx=892,
+        broken_start_idx=-1,
+        broken_end_idx=-1,
+    )
+    p = Pivot(idx=887, kind="LOW", price=4.739, label="HL")
+    assert pivot_label_for_htf_display(p, lock) == "LL"
+
+
 def test_filter_pivots_hides_lh_during_full_lock_keeps_retracement_hl() -> None:
     pivots = [
         Pivot(idx=0, kind="LOW", price=100.0, label="HL"),
