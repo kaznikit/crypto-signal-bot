@@ -10,6 +10,7 @@ from bot.market.pivots import (
     detect_pivots,
     extract_impulse_legs,
     extract_structure_breaks_htf,
+    filter_causal_structure_breaks,
     find_first_touch_idx,
     impulse_invalidated,
     latest_structure_break,
@@ -51,11 +52,11 @@ def detect_continuation_prepare(
     prepare_state: ContinuationPrepareState | None = None,
     ltf_expected: str = "5M",
 ) -> tuple[Setup | None, SetupEvent | None]:
-    """PREPARE-continuation: одно касание 0.5 на событие BOS.
+    """PREPARE-continuation: одно касание 0.5 на событие BOS/CHoCH.
 
     1. **Lock направления** (``prepare_state``): сбрасывается при
-       противоположном BOS.
-    2. Якорь = ``continuation_anchor_break`` — последний BOS в lock-
+       противоположном BOS/CHoCH.
+    2. Якорь = ``continuation_anchor_break`` — последний BOS/CHoCH в lock-
        направлении **строго после** последнего противоположного пробоя.
     3. Нога с ``end_idx >= broken_idx``; первая по времени нога с эмиссией
        на текущем баре.
@@ -66,10 +67,19 @@ def detect_continuation_prepare(
 
     last_pos = int(htf_df.index[-1])
 
-    breaks = extract_structure_breaks_htf(
+    breaks_all = extract_structure_breaks_htf(
         htf_df, swing_size=swing_size, use_close=bos_use_close, impulse_lock=True
     )
-    anchor_kinds: tuple[str, ...] = ("BOS",)
+    breaks = filter_causal_structure_breaks(
+        breaks_all,
+        htf_df,
+        swing_size=swing_size,
+        use_close=bos_use_close,
+        impulse_lock=True,
+        max_bars_ago=structure_max_bars_ago,
+        last_idx=last_pos,
+    )
+    anchor_kinds: tuple[str, ...] = ("BOS", "CHOCH")
     last_any = latest_structure_break(
         breaks,
         kinds=anchor_kinds,

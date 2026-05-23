@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+import bot.market.pivots as pivmod
 from bot.market.pivots import (
     ImpulseLeg,
     Pivot,
@@ -18,6 +19,7 @@ from bot.market.pivots import (
     detect_pivots,
     extract_impulse_legs,
     extract_structure_breaks,
+    filter_causal_structure_breaks,
     find_first_touch_idx,
     first_touch_of_level_since,
     impulse_invalidated,
@@ -268,6 +270,35 @@ def test_latest_structure_break_filters_by_age_and_direction() -> None:
     assert latest_structure_break(
         breaks, last_idx=last_idx, max_bars_ago=0
     ) in {breaks[-1], None}
+
+
+def test_filter_causal_structure_breaks_drops_retroactive_break(monkeypatch) -> None:
+    """Брейк, отсутствующий на своём баре в префиксе, не должен считаться causal."""
+    df = _df([100.0 + i for i in range(12)], spread=0.1)
+    br_causal = StructureBreak(direction="SHORT", kind="CHOCH", swing_idx=1, swing_price=99.0, broken_idx=3)
+    br_retro = StructureBreak(direction="LONG", kind="CHOCH", swing_idx=4, swing_price=105.0, broken_idx=6)
+
+    def _fake_extract(df_prefix: pd.DataFrame, swing_size: int, *, use_close: bool = True, impulse_lock: bool = True):
+        last = int(df_prefix.index[-1])
+        if last >= 6:
+            # На самом broken-баре (6) второй брейк ещё не «виден».
+            return [br_causal] if last == 6 else [br_causal, br_retro]
+        if last >= 3:
+            return [br_causal]
+        return []
+
+    monkeypatch.setattr(pivmod, "extract_structure_breaks_htf", _fake_extract)
+
+    out = filter_causal_structure_breaks(
+        [br_causal, br_retro],
+        df,
+        swing_size=3,
+        use_close=True,
+        impulse_lock=True,
+        max_bars_ago=20,
+        last_idx=len(df) - 1,
+    )
+    assert out == [br_causal]
 
 
 def test_detect_ltf_entry_confirm_filters_direction() -> None:

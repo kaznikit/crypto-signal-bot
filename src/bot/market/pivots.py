@@ -875,6 +875,58 @@ def latest_structure_break(
     return filtered[-1]
 
 
+def filter_causal_structure_breaks(
+    breaks: list[StructureBreak],
+    df: pd.DataFrame,
+    *,
+    swing_size: int,
+    use_close: bool = True,
+    impulse_lock: bool = True,
+    max_bars_ago: int | None = None,
+    last_idx: int | None = None,
+) -> list[StructureBreak]:
+    """Оставляет только пробои, которые были видимы на своём баре.
+
+    Некоторые CHOCH/BOS в HTF impulse-lock могут появляться ретроспективно при
+    пересчёте на более длинном хвосте. Такие события не должны якорить PREPARE.
+    """
+    if not breaks:
+        return []
+    if df is None or df.empty:
+        return []
+
+    candidate = breaks
+    if max_bars_ago is not None and last_idx is not None:
+        candidate = [b for b in candidate if (last_idx - b.broken_idx) <= max_bars_ago]
+        if not candidate:
+            return []
+
+    visible_cache: dict[int, set[tuple[int, int, str, str]]] = {}
+    out: list[StructureBreak] = []
+    for br in candidate:
+        broken_idx = int(br.broken_idx)
+        if broken_idx < 0 or broken_idx >= len(df):
+            continue
+        visible = visible_cache.get(broken_idx)
+        if visible is None:
+            df_prefix = df.iloc[: broken_idx + 1]
+            prefix_breaks = extract_structure_breaks_htf(
+                df_prefix,
+                swing_size=swing_size,
+                use_close=use_close,
+                impulse_lock=impulse_lock,
+            )
+            visible = {
+                (int(b.broken_idx), int(b.swing_idx), b.direction, b.kind)
+                for b in prefix_breaks
+            }
+            visible_cache[broken_idx] = visible
+        key = (int(br.broken_idx), int(br.swing_idx), br.direction, br.kind)
+        if key in visible:
+            out.append(br)
+    return out
+
+
 def opposite_structure_break_since_open_ms(
     breaks: list[StructureBreak],
     df: pd.DataFrame,

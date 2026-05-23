@@ -1,6 +1,9 @@
+import pandas as pd
+
 from bot.history_replay import (
     ClosedTrade,
     OpenTrade,
+    _filter_invalidated_impulses,
     _max_drawdown_r,
     _resolve_trade_exit,
     _summarize,
@@ -68,3 +71,45 @@ def test_summarize_basic_metrics() -> None:
     assert summary.losses == 1
     assert summary.winrate_pct == 50.0
     assert summary.total_r == 1.0
+
+
+def test_filter_invalidated_impulses_keeps_prepare_referenced_leg() -> None:
+    df = pd.DataFrame(
+        [
+            {"open_time": 0, "open": 100.0, "high": 105.0, "low": 99.0, "close": 104.0, "volume": 1.0},
+            {"open_time": 60_000, "open": 104.0, "high": 110.0, "low": 103.0, "close": 108.0, "volume": 1.0},
+            {"open_time": 120_000, "open": 108.0, "high": 109.0, "low": 100.0, "close": 101.0, "volume": 1.0},
+            {"open_time": 180_000, "open": 101.0, "high": 112.0, "low": 100.0, "close": 111.0, "volume": 1.0},
+        ]
+    )
+    events = [
+        {
+            "kind": "PREPARE",
+            "htf": "1H",
+            "direction": "SHORT",
+            "impulse_leg_start_open_ms": 60_000,
+            "impulse_leg_end_open_ms": 120_000,
+        },
+        {
+            "kind": "IMPULSE",
+            "htf": "1H",
+            "direction": "SHORT",
+            "start_open_ms": 60_000,
+            "end_open_ms": 120_000,
+            "start_price": 110.0,
+        },
+        {
+            "kind": "IMPULSE",
+            "htf": "1H",
+            "direction": "SHORT",
+            "start_open_ms": 0,
+            "end_open_ms": 60_000,
+            "start_price": 105.0,
+        },
+    ]
+
+    _filter_invalidated_impulses(events, {"1H": df})
+
+    impulses = [e for e in events if e.get("kind") == "IMPULSE"]
+    assert len(impulses) == 1
+    assert int(impulses[0]["start_open_ms"]) == 60_000

@@ -279,6 +279,18 @@ def _filter_invalidated_impulses(
         for tf, df in dfs.items()
     }
 
+    referenced_impulses: set[tuple[str, int, int, str]] = set()
+    for ev in events:
+        if ev.get("kind") != "PREPARE":
+            continue
+        htf = str(ev.get("htf") or "")
+        direction = str(ev.get("direction") or "")
+        start_ms = int(ev.get("impulse_leg_start_open_ms") or 0)
+        end_ms = int(ev.get("impulse_leg_end_open_ms") or 0)
+        if not htf or direction not in {"LONG", "SHORT"} or start_ms <= 0 or end_ms <= 0:
+            continue
+        referenced_impulses.add((htf, start_ms, end_ms, direction))
+
     keep: list[dict[str, Any]] = []
     for ev in events:
         if ev.get("kind") != "IMPULSE":
@@ -298,6 +310,12 @@ def _filter_invalidated_impulses(
             keep.append(ev)
             continue
         if end_idx < 0 or direction not in ("LONG", "SHORT"):
+            keep.append(ev)
+            continue
+        impulse_key = (htf, int(ev.get("start_open_ms") or 0), end_ms, direction)
+        if impulse_key in referenced_impulses:
+            # Если IMPULSE реально использован в PREPARE, оставляем его на чарте,
+            # даже если позже этот импульс был структурно сломан.
             keep.append(ev)
             continue
         if impulse_invalidated(
@@ -661,6 +679,15 @@ async def run_history_replay(
                                     "structure_broken_open_ms": event.payload.get(
                                         "structure_broken_open_ms"
                                     ),
+                                    "impulse_leg_start_open_ms": event.payload.get(
+                                        "impulse_leg_start_open_ms"
+                                    ),
+                                    "impulse_leg_end_open_ms": event.payload.get(
+                                        "impulse_leg_end_open_ms"
+                                    ),
+                                    "structure_break_key": event.payload.get(
+                                        "structure_break_key"
+                                    ),
                                 }
                             )
 
@@ -775,6 +802,15 @@ async def run_history_replay(
                             ),
                             "structure_broken_open_ms": event.payload.get(
                                 "structure_broken_open_ms"
+                            ),
+                            "impulse_leg_start_open_ms": event.payload.get(
+                                "impulse_leg_start_open_ms"
+                            ),
+                            "impulse_leg_end_open_ms": event.payload.get(
+                                "impulse_leg_end_open_ms"
+                            ),
+                            "structure_break_key": event.payload.get(
+                                "structure_break_key"
                             ),
                         }
                     )
