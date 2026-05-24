@@ -18,6 +18,7 @@ from bot.market.pivots import (
     detect_ltf_entry_confirm,
     detect_pivots,
     extract_impulse_legs,
+    extract_impulse_legs_confirmed,
     extract_structure_breaks,
     filter_causal_structure_breaks,
     find_first_touch_idx,
@@ -130,6 +131,59 @@ def test_extract_impulse_legs_only_hl_to_hh_and_lh_to_ll() -> None:
     )
     assert legs[1] == ImpulseLeg(
         direction="SHORT", start_idx=15, start_price=110.0, end_idx=20, end_price=80.0
+    )
+
+
+def test_extract_impulse_legs_confirmed_requires_same_dir_break_in_window() -> None:
+    """Импульс без BOS/CHoCH в окне формирования не попадает в confirmed."""
+    swing = 3
+    pivots = [
+        Pivot(idx=0, kind="LOW", price=100.0, label="HL"),
+        Pivot(idx=10, kind="HIGH", price=120.0, label="HH"),
+        Pivot(idx=20, kind="LOW", price=90.0, label="LL"),
+        Pivot(idx=30, kind="HIGH", price=110.0, label="LH"),
+        Pivot(idx=40, kind="LOW", price=80.0, label="LL"),
+    ]
+    long_leg = ImpulseLeg("LONG", 0, 100.0, 10, 120.0)
+    short_leg = ImpulseLeg("SHORT", 30, 110.0, 40, 80.0)
+
+    bos_long_in_window = StructureBreak(
+        direction="LONG",
+        kind="BOS",
+        swing_idx=5,
+        swing_price=115.0,
+        broken_idx=8,
+    )
+    confirmed = extract_impulse_legs_confirmed(
+        pivots, [bos_long_in_window], swing_size=swing
+    )
+    assert long_leg in confirmed
+    assert short_leg not in confirmed
+
+    assert extract_impulse_legs_confirmed(pivots, [], swing_size=swing) == []
+
+    bos_short_only = StructureBreak(
+        direction="SHORT",
+        kind="BOS",
+        swing_idx=30,
+        swing_price=110.0,
+        broken_idx=38,
+    )
+    confirmed2 = extract_impulse_legs_confirmed(
+        pivots, [bos_short_only], swing_size=swing
+    )
+    assert long_leg not in confirmed2
+    assert short_leg in confirmed2
+
+    bos_long_after_window = StructureBreak(
+        direction="LONG",
+        kind="BOS",
+        swing_idx=5,
+        swing_price=115.0,
+        broken_idx=20,
+    )
+    assert long_leg not in extract_impulse_legs_confirmed(
+        pivots, [bos_long_after_window], swing_size=swing
     )
 
 

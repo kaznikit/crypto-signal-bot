@@ -11,6 +11,7 @@ from bot.market.pivots import (
     detect_pivots,
     detect_pivots_htf,
     extract_impulse_legs,
+    extract_impulse_legs_confirmed,
     extract_structure_breaks,
     extract_structure_breaks_htf,
     filter_pivots_by_impulse_lock,
@@ -378,6 +379,52 @@ def test_apply_impulse_invalidation_choch_not_downgraded_by_reclassify() -> None
     assert at_inv[0].swing_price == 100.0
 
 
+def test_extract_structure_breaks_htf_reclassifies_double_choch(monkeypatch) -> None:
+    """После impulse-lock второй подряд CHOCH того же направления становится BOS."""
+    raw = [
+        StructureBreak("LONG", "BOS", 1, 110.0, 10),
+        StructureBreak("SHORT", "CHOCH", 2, 95.0, 20),
+        StructureBreak("SHORT", "CHOCH", 3, 90.0, 30),
+    ]
+    dummy_state = ImpulseLockState(
+        leg=ImpulseLeg("LONG", 0, 100.0, 5, 130.0),
+        lock_from_idx=8,
+        broken_start_idx=-1,
+        broken_end_idx=-1,
+    )
+
+    monkeypatch.setattr(
+        "bot.market.pivots.extract_structure_breaks",
+        lambda df, swing_size, use_close=True: raw,
+    )
+    monkeypatch.setattr(
+        "bot.market.pivots.detect_pivots",
+        lambda df, swing_size: [Pivot(0, "LOW", 100.0, "HL")],
+    )
+    monkeypatch.setattr(
+        "bot.market.pivots.compute_impulse_lock_state",
+        lambda df, pivots, swing_size, use_close=True, breaks=None: dummy_state,
+    )
+    monkeypatch.setattr(
+        "bot.market.pivots.filter_structure_breaks_by_impulse_lock",
+        lambda breaks, state: breaks,
+    )
+    monkeypatch.setattr(
+        "bot.market.pivots.apply_impulse_invalidation_choch",
+        lambda breaks, state: breaks,
+    )
+
+    out = extract_structure_breaks_htf(
+        _df([100.0] * 40, spread=0.1),
+        swing_size=3,
+        use_close=True,
+        impulse_lock=True,
+    )
+    assert len(out) == 3
+    assert out[1].direction == "SHORT" and out[1].kind == "CHOCH"
+    assert out[2].direction == "SHORT" and out[2].kind == "BOS"
+
+
 def test_break_of_hl_is_choch_even_before_lock_confirmed() -> None:
     """Если слом HL пришёл раньше чем end+swing, на самом баре должен быть CHOCH."""
     closes = [
@@ -518,8 +565,12 @@ def test_detect_pivots_htf_matches_filter_helper() -> None:
     swing = 3
     raw = detect_pivots(df, swing_size=swing)
     htf = detect_pivots_htf(df, swing_size=swing, use_close=True, impulse_lock=True)
-    state = compute_impulse_lock_state(df, raw, swing_size=swing, use_close=True)
-    expected = filter_pivots_by_impulse_lock(raw, state)
+    breaks = extract_structure_breaks(df, swing_size=swing, use_close=True)
+    state = compute_impulse_lock_state(
+        df, raw, swing_size=swing, use_close=True, breaks=breaks
+    )
+    legs = extract_impulse_legs_confirmed(raw, breaks, swing_size=swing)
+    expected = filter_pivots_by_impulse_lock(raw, state, impulse_legs=legs)
     assert htf == expected
 
 
@@ -538,3 +589,76 @@ def test_structure_before_hh_kept_under_lock() -> None:
                 lock.broken_start_idx if lock.broken_start_idx >= 0 else 10**9,
                 lock.broken_end_idx if lock.broken_end_idx >= 0 else 10**9,
             )
+
+
+def test_yellow_rectangle_high_labeled_as_lh_under_short_impulse_lock() -> None:
+    """Откатный high после SHORT-импульса: LH, не перекрашивается старым LONG-lock."""
+    lock = ImpulseLockState(
+        leg=ImpulseLeg("SHORT", 35, 180.0, 50, 120.0),
+        lock_from_idx=53,
+        broken_start_idx=-1,
+        broken_end_idx=-1,
+    )
+    corrective_high = Pivot(idx=60, kind="HIGH", price=170.0, label="LH")
+    legs = [lock.leg]
+    assert pivot_label_for_htf_display(corrective_high, lock, impulse_legs=legs) == "LH"
+
+
+def test_compute_impulse_lock_uses_confirmed_short_not_phantom_long() -> None:
+    """Последний геометрический HL→HH без BOS — lock на SHORT, не на фантомный LONG."""
+    swing = 3
+    pivots = [
+        Pivot(idx=10, kind="HIGH", price=200.0, label="HH"),
+        Pivot(idx=20, kind="LOW", price=150.0, label="LL"),
+        Pivot(idx=30, kind="HIGH", price=180.0, label="LH"),
+        Pivot(idx=40, kind="LOW", price=120.0, label="LL"),
+        Pivot(idx=50, kind="LOW", price=130.0, label="HL"),
+        Pivot(idx=60, kind="HIGH", price=140.0, label="HH"),
+    ]
+    breaks = [
+        StructureBreak(
+            direction="SHORT",
+            kind="BOS",
+            swing_idx=30,
+            swing_price=180.0,
+            broken_idx=35,
+        ),
+    ]
+    closes = [160.0] * 65
+    df = _df(closes, spread=0.2)
+    state = compute_impulse_lock_state(
+        df, pivots, swing_size=swing, use_close=True, breaks=breaks
+    )
+    assert state is not None
+    assert state.leg.direction == "SHORT"
+    assert state.leg.end_idx == 40
+
+    state_geom = compute_impulse_lock_state(
+        df, pivots, swing_size=swing, use_close=True, breaks=None
+    )
+    assert state_geom is not None
+    assert state_geom.leg.direction == "LONG"
+    assert state_geom.leg.end_idx == 60
+
+
+def test_two_confirmed_short_impulse_legs() -> None:
+    """Две LH→LL ноги с BOS SHORT в окне — обе в confirmed (второй P SHORT)."""
+    swing = 3
+    pivots = [
+        Pivot(idx=0, kind="HIGH", price=200.0, label="HH"),
+        Pivot(idx=10, kind="LOW", price=150.0, label="LL"),
+        Pivot(idx=20, kind="HIGH", price=180.0, label="LH"),
+        Pivot(idx=30, kind="LOW", price=120.0, label="LL"),
+        Pivot(idx=40, kind="HIGH", price=160.0, label="LH"),
+        Pivot(idx=50, kind="LOW", price=100.0, label="LL"),
+    ]
+    breaks = [
+        StructureBreak("SHORT", "CHOCH", swing_idx=10, swing_price=150.0, broken_idx=15),
+        StructureBreak("SHORT", "BOS", swing_idx=20, swing_price=180.0, broken_idx=25),
+        StructureBreak("SHORT", "BOS", swing_idx=40, swing_price=160.0, broken_idx=45),
+    ]
+    legs = extract_impulse_legs_confirmed(pivots, breaks, swing_size=swing)
+    short_legs = [leg for leg in legs if leg.direction == "SHORT"]
+    assert len(short_legs) == 2
+    assert short_legs[0].end_idx == 30
+    assert short_legs[1].end_idx == 50

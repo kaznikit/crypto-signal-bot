@@ -8,7 +8,7 @@ from bot.analyzer.setup_machine import SetupEvent, build_setup, make_setup_id
 from bot.market.pivots import (
     continuation_anchor_break,
     detect_pivots,
-    extract_impulse_legs,
+    extract_impulse_legs_confirmed,
     extract_structure_breaks_htf,
     filter_causal_structure_breaks,
     find_first_touch_idx,
@@ -24,10 +24,10 @@ from bot.storage.models import Setup, SetupType
 
 @dataclass
 class ContinuationPrepareState:
-    """Состояние walk-forward replay: один PREPARE на BOS/CHoCH, lock направления."""
+    """Состояние walk-forward replay: lock направления + дедуп по ноге."""
 
     direction_lock_by_htf: dict[str, str] = field(default_factory=dict)
-    prepared_break_keys: set[tuple[str, int, int, str, str]] = field(
+    prepared_leg_keys: set[tuple[str, int, int, str, str, int, int]] = field(
         default_factory=set
     )
 
@@ -107,8 +107,8 @@ def detect_continuation_prepare(
             if last_any.kind == "BOS" or anchor_new is not None:
                 prepare_state.direction_lock_by_htf[htf] = last_any.direction
                 lock = last_any.direction
-                prepare_state.prepared_break_keys = {
-                    k for k in prepare_state.prepared_break_keys if k[0] != htf
+                prepare_state.prepared_leg_keys = {
+                    k for k in prepare_state.prepared_leg_keys if k[0] != htf
                 }
             else:
                 _funnel_inc(funnel, "opposite_structure_no_anchor_yet")
@@ -147,9 +147,6 @@ def detect_continuation_prepare(
         return None, None
 
     br_key = structure_break_key(htf, last_break, htf_df)
-    if prepare_state is not None and br_key in prepare_state.prepared_break_keys:
-        _funnel_inc(funnel, "prepare_already_emitted_for_break")
-        return None, None
 
     if not raw_pivots:
         return None, None
@@ -157,7 +154,9 @@ def detect_continuation_prepare(
     # Только настоящие импульсные ноги HL→HH (LONG) / LH→LL (SHORT). Pine-эталон
     # рисует P/0.5-линию ровно для них. Любые HIGH↔LOW (например HH→первый
     # новый low после CHOCH) дают ложный P SHORT до подтверждения LH.
-    legs = extract_impulse_legs(raw_pivots)
+    legs = extract_impulse_legs_confirmed(
+        raw_pivots, breaks_all, swing_size=swing_size
+    )
     if not legs:
         return None, None
 
@@ -224,8 +223,20 @@ def detect_continuation_prepare(
     if impulse is None:
         return None, None
 
+    leg_key = (
+        htf,
+        br_key[1],
+        br_key[2],
+        br_key[3],
+        br_key[4],
+        int(impulse.start_idx),
+        int(impulse.end_idx),
+    )
     if prepare_state is not None:
-        prepare_state.prepared_break_keys.add(br_key)
+        if leg_key in prepare_state.prepared_leg_keys:
+            _funnel_inc(funnel, "prepare_already_emitted_for_leg")
+            return None, None
+        prepare_state.prepared_leg_keys.add(leg_key)
 
     setup_id = make_setup_id(symbol, SetupType.CONTINUATION, htf, close_time)
     start_open_ms = int(htf_df.iloc[impulse.start_idx]["open_time"])

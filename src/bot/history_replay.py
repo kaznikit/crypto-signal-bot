@@ -37,7 +37,7 @@ from bot.market.pivots import (
     compute_impulse_lock_state,
     detect_pivots,
     detect_pivots_htf,
-    extract_impulse_legs,
+    extract_impulse_legs_confirmed,
     extract_structure_breaks_htf,
     impulse_invalidated,
     impulse_leg_anchor_idxs,
@@ -185,9 +185,18 @@ def _emit_fresh_pivot_events(
         return
     last_pos = int(df.index[-1])
     confirm_idx = last_pos - swing_size
-    impulse_legs = extract_impulse_legs(raw_pivots)
+    visible_breaks = extract_structure_breaks_htf(
+        df, swing_size=swing_size, use_close=bos_use_close, impulse_lock=True
+    )
+    impulse_legs = extract_impulse_legs_confirmed(
+        raw_pivots, visible_breaks, swing_size=swing_size
+    )
     lock_state = compute_impulse_lock_state(
-        df, raw_pivots, swing_size=swing_size, use_close=bos_use_close
+        df,
+        raw_pivots,
+        swing_size=swing_size,
+        use_close=bos_use_close,
+        breaks=visible_breaks,
     )
 
     for pivot in raw_pivots:
@@ -216,7 +225,7 @@ def _emit_fresh_pivot_events(
             }
         )
 
-    for leg in extract_impulse_legs(raw_pivots):
+    for leg in impulse_legs:
         if leg.end_idx != confirm_idx:
             continue
         events_out.append(
@@ -232,11 +241,7 @@ def _emit_fresh_pivot_events(
                 "bar_open_ms": int(df.iloc[last_pos]["open_time"]),
             }
         )
-
-    breaks = extract_structure_breaks_htf(
-        df, swing_size=swing_size, use_close=bos_use_close, impulse_lock=True
-    )
-    for br in breaks:
+    for br in visible_breaks:
         if br.broken_idx != last_pos:
             continue
         try:
@@ -325,6 +330,75 @@ def _filter_invalidated_impulses(
             after_idx=end_idx,
         ):
             continue
+        keep.append(ev)
+    events[:] = keep
+
+
+def _normalize_structure_sequence(events: list[dict[str, Any]]) -> None:
+    """Нормализация STRUCTURE для overlay: CHOCH только при смене направления.
+
+    На графике пользователю нужна последовательность:
+    - смена направления -> CHOCH
+    - продолжение в том же направлении -> BOS
+    """
+    last_dir_by_htf: dict[str, str] = {}
+    for ev in events:
+        if ev.get("kind") != "STRUCTURE":
+            continue
+        htf = str(ev.get("htf") or "")
+        direction = str(ev.get("direction") or "")
+        if not htf or direction not in {"LONG", "SHORT"}:
+            continue
+        prev_dir = last_dir_by_htf.get(htf)
+        ev["subkind"] = "BOS" if prev_dir == direction else "CHOCH"
+        last_dir_by_htf[htf] = direction
+
+
+def _dedupe_overlay_events(events: list[dict[str, Any]]) -> None:
+    """Удаляет дубли PIVOT/STRUCTURE/IMPULSE/PREPARE по стабильным ключам."""
+    keep: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for ev in events:
+        kind = str(ev.get("kind") or "")
+        if kind == "PIVOT":
+            key = (
+                kind,
+                str(ev.get("symbol") or ""),
+                str(ev.get("htf") or ""),
+                int(ev.get("bar_open_ms") or 0),
+                str(ev.get("label") or ""),
+                str(ev.get("pivot_kind") or ""),
+            )
+        elif kind == "STRUCTURE":
+            key = (
+                kind,
+                str(ev.get("symbol") or ""),
+                str(ev.get("htf") or ""),
+                int(ev.get("bar_open_ms") or 0),
+                str(ev.get("direction") or ""),
+                str(ev.get("subkind") or ""),
+                int(ev.get("swing_open_ms") or 0),
+            )
+        elif kind == "IMPULSE":
+            key = (
+                kind,
+                str(ev.get("symbol") or ""),
+                str(ev.get("htf") or ""),
+                int(ev.get("start_open_ms") or 0),
+                int(ev.get("end_open_ms") or 0),
+                str(ev.get("direction") or ""),
+            )
+        elif kind == "PREPARE":
+            key = (
+                kind,
+                str(ev.get("setup_id") or ""),
+                int(ev.get("bar_open_ms") or 0),
+            )
+        else:
+            key = (kind, id(ev))
+        if key in seen:
+            continue
+        seen.add(key)
         keep.append(ev)
     events[:] = keep
 
@@ -1085,6 +1159,8 @@ async def run_history_replay(
         funnel["trade_closed_eod"] += 1
 
     if events_out is not None:
+        _dedupe_overlay_events(events_out)
+        _normalize_structure_sequence(events_out)
         _filter_invalidated_impulses(events_out, dfs)
 
     summary = _summarize(symbol=symbol, mode=mode, closed_trades=closed_trades)

@@ -180,6 +180,32 @@ def extract_impulse_legs(pivots: list[Pivot]) -> list[ImpulseLeg]:
     return legs
 
 
+def extract_impulse_legs_confirmed(
+    pivots: list[Pivot],
+    breaks: list[StructureBreak],
+    *,
+    swing_size: int,
+) -> list[ImpulseLeg]:
+    """HL→HH / LH→LL только при подтверждающем BOS/CHOCH той же стороны.
+
+    Подтверждающий пробой должен быть рядом с завершением ноги:
+    ``[leg.end_idx - 2 * swing_size, leg.end_idx + swing_size]``.
+    Это исключает «старыe» пробои внутри длинного отката, когда реального
+    структурного подтверждения у текущего импульса уже нет.
+    """
+    out: list[ImpulseLeg] = []
+    for leg in extract_impulse_legs(pivots):
+        window_start = max(0, leg.end_idx - 2 * swing_size)
+        window_end = leg.end_idx + swing_size
+        if any(
+            br.direction == leg.direction
+            and window_start <= br.broken_idx <= window_end
+            for br in breaks
+        ):
+            out.append(leg)
+    return out
+
+
 def extract_all_pivot_legs(pivots: list[Pivot]) -> list[ImpulseLeg]:
     """Все ноги между последовательными пивотами противоположного типа.
 
@@ -328,9 +354,20 @@ def latest_impulse_leg(
     pivots: list[Pivot],
     *,
     direction: str | None = None,
+    breaks: list[StructureBreak] | None = None,
+    swing_size: int = 1,
 ) -> ImpulseLeg | None:
-    """Последний impulse leg в указанном направлении (или вообще последний)."""
-    legs = extract_impulse_legs(pivots)
+    """Последний impulse leg в указанном направлении (или вообще последний).
+
+    Если передан ``breaks``, берутся только ноги с подтверждающим BOS/CHoCH
+    (``extract_impulse_legs_confirmed``).
+    """
+    if breaks is not None:
+        legs = extract_impulse_legs_confirmed(
+            pivots, breaks, swing_size=swing_size
+        )
+    else:
+        legs = extract_impulse_legs(pivots)
     if direction is not None:
         legs = [leg for leg in legs if leg.direction == direction]
     return legs[-1] if legs else None
@@ -394,12 +431,16 @@ def compute_impulse_lock_state(
     *,
     swing_size: int,
     use_close: bool = True,
+    breaks: list[StructureBreak] | None = None,
 ) -> ImpulseLockState | None:
     """Состояние HTF-lock для последнего импульса, если идёт ретрейс без пробоя границ.
 
     ``None`` — lock не активен (импульс ещё строится, или обе границы уже обновлены).
+
+    Передайте ``breaks`` (сырой ``extract_structure_breaks``), чтобы lock строился
+    только на импульсах, подтверждённых BOS/CHoCH.
     """
-    leg = latest_impulse_leg(pivots)
+    leg = latest_impulse_leg(pivots, breaks=breaks, swing_size=swing_size)
     if leg is None:
         return None
     lock_from_idx = leg.end_idx + swing_size
@@ -721,8 +762,15 @@ def prepare_suppressed_after_trend_flip(
     Решает: P SHORT на отскоке (reversal/continuation по 0.5 старого импульса)
     вместо метки LH на пике.
     """
+    breaks_raw = extract_structure_breaks(
+        df, swing_size=swing_size, use_close=use_close
+    )
     state = compute_impulse_lock_state(
-        df, raw_pivots, swing_size=swing_size, use_close=use_close
+        df,
+        raw_pivots,
+        swing_size=swing_size,
+        use_close=use_close,
+        breaks=breaks_raw,
     )
     if state is None or state.broken_start_idx < 0:
         return False
@@ -759,8 +807,15 @@ def latest_choch_break(
     )
     if choch is not None:
         return choch
+    breaks_raw = extract_structure_breaks(
+        df, swing_size=swing_size, use_close=use_close
+    )
     state = compute_impulse_lock_state(
-        df, pivots, swing_size=swing_size, use_close=use_close
+        df,
+        pivots,
+        swing_size=swing_size,
+        use_close=use_close,
+        breaks=breaks_raw,
     )
     inv = impulse_invalidation_structure_break(state)
     if inv is None:
@@ -780,8 +835,15 @@ def prepare_suppressed_during_impulse_lock(
     setup_direction: str,
 ) -> bool:
     """Блокируем контртрендовый PREPARE в ретрейсе импульса (P SHORT до слома HL)."""
+    breaks_raw = extract_structure_breaks(
+        df, swing_size=swing_size, use_close=use_close
+    )
     state = compute_impulse_lock_state(
-        df, raw_pivots, swing_size=swing_size, use_close=use_close
+        df,
+        raw_pivots,
+        swing_size=swing_size,
+        use_close=use_close,
+        breaks=breaks_raw,
     )
     if state is None:
         return False
@@ -803,9 +865,18 @@ def detect_pivots_htf(
     pivots = detect_pivots(df, swing_size=swing_size)
     if not impulse_lock:
         return pivots
-    legs = extract_impulse_legs(pivots)
+    breaks_raw = extract_structure_breaks(
+        df, swing_size=swing_size, use_close=use_close
+    )
+    legs = extract_impulse_legs_confirmed(
+        pivots, breaks_raw, swing_size=swing_size
+    )
     state = compute_impulse_lock_state(
-        df, pivots, swing_size=swing_size, use_close=use_close
+        df,
+        pivots,
+        swing_size=swing_size,
+        use_close=use_close,
+        breaks=breaks_raw,
     )
     return filter_pivots_by_impulse_lock(pivots, state, impulse_legs=legs)
 
@@ -823,12 +894,19 @@ def extract_structure_breaks_htf(
         return breaks
     pivots = detect_pivots(df, swing_size=swing_size)
     state = compute_impulse_lock_state(
-        df, pivots, swing_size=swing_size, use_close=use_close
+        df,
+        pivots,
+        swing_size=swing_size,
+        use_close=use_close,
+        breaks=breaks,
     )
     if state is None:
         return breaks
     filtered = filter_structure_breaks_by_impulse_lock(breaks, state)
-    return apply_impulse_invalidation_choch(filtered, state)
+    with_invalidation = apply_impulse_invalidation_choch(filtered, state)
+    # После фильтрации/подмешивания синтетического CHOCH пересчитываем видимые
+    # BOS/CHOCH по порядку событий, чтобы не было двух CHOCH подряд.
+    return reclassify_structure_break_kinds(with_invalidation)
 
 
 def structure_break_key(

@@ -8,6 +8,7 @@ from bot.analyzer.continuation import (
     ContinuationPrepareState,
     detect_continuation_prepare,
 )
+from bot.market.pivots import Pivot, StructureBreak
 
 
 def _swing_then_break_df() -> pd.DataFrame:
@@ -318,7 +319,7 @@ def test_confirmation_lag_touch_emits_on_pivot_confirm_bar() -> None:
 
 
 def test_leg_emits_prepare_only_once_on_walk_forward() -> None:
-    """Один PREPARE на BOS/CHoCH: повторные касания 0.5 других ног не эмитят."""
+    """Повторно не эмитим PREPARE по той же ноге в walk-forward."""
     bars: list[dict[str, float | int]] = []
     pattern: list[float] = []
     pattern += [100.0] * 6
@@ -340,9 +341,9 @@ def test_leg_emits_prepare_only_once_on_walk_forward() -> None:
         )
     df = pd.DataFrame(bars)
     state = ContinuationPrepareState()
-    emissions = 0
+    emitted_legs: set[tuple[int, int, str]] = set()
     for end in range(len(df)):
-        setup, _ = detect_continuation_prepare(
+        setup, event = detect_continuation_prepare(
             symbol="TEST",
             htf="1H",
             htf_df=df.iloc[: end + 1],
@@ -353,9 +354,15 @@ def test_leg_emits_prepare_only_once_on_walk_forward() -> None:
             structure_max_bars_ago=len(df),
             prepare_state=state,
         )
-        if setup is not None:
-            emissions += 1
-    assert emissions <= 1
+        if setup is None or event is None:
+            continue
+        key = (
+            int(event.payload["impulse_leg_start_open_ms"]),
+            int(event.payload["impulse_leg_end_open_ms"]),
+            str(setup.direction),
+        )
+        assert key not in emitted_legs
+        emitted_legs.add(key)
 
 
 def test_short_prepare_possible_after_choch_short_when_lock_was_long() -> None:
@@ -445,11 +452,11 @@ def test_no_long_prepare_after_opposite_structure_without_new_long_bos() -> None
         assert setup.direction != "LONG"
 
 
-def test_only_one_long_prepare_per_long_bos_episode() -> None:
-    """После LONG BOS — максимум один LONG PREPARE до следующего противоположного BOS."""
+def test_multiple_long_prepares_allowed_for_distinct_legs() -> None:
+    """После LONG BOS возможны несколько PREPARE, если это разные импульсные ноги."""
     df = _swing_then_break_df()
     state = ContinuationPrepareState()
-    long_prepares = 0
+    long_leg_keys: set[tuple[int, int]] = set()
     for end in range(len(df)):
         setup, event = detect_continuation_prepare(
             symbol="TEST",
@@ -463,10 +470,15 @@ def test_only_one_long_prepare_per_long_bos_episode() -> None:
             prepare_state=state,
         )
         if setup is not None and setup.direction == "LONG":
-            long_prepares += 1
             assert event is not None
             assert event.payload["structure_kind"] in {"BOS", "CHOCH"}
-    assert long_prepares <= 1
+            long_leg_keys.add(
+                (
+                    int(event.payload["impulse_leg_start_open_ms"]),
+                    int(event.payload["impulse_leg_end_open_ms"]),
+                )
+            )
+    assert len(long_leg_keys) >= 1
 
 
 def test_continuation_prepare_direction_matches_last_structure_break() -> None:
@@ -498,3 +510,76 @@ def test_continuation_prepare_direction_matches_last_structure_break() -> None:
     assert setup.direction == last_break.direction
     assert event.payload["structure_kind"] == last_break.kind
     assert event.payload["direction"] == last_break.direction
+
+
+def test_no_prepare_long_without_bos_in_impulse_window() -> None:
+    """Геометрический HL→HH без BOS/CHoCH LONG в окне ноги — нет P LONG."""
+    from bot.market.pivots import (
+        detect_pivots,
+        extract_impulse_legs,
+        extract_impulse_legs_confirmed,
+        extract_structure_breaks,
+    )
+
+    swing = 3
+    pivots = [
+        Pivot(idx=0, kind="LOW", price=100.0, label="HL"),
+        Pivot(idx=10, kind="HIGH", price=120.0, label="HH"),
+    ]
+    breaks = [
+        StructureBreak(
+            direction="SHORT",
+            kind="CHOCH",
+            swing_idx=0,
+            swing_price=100.0,
+            broken_idx=5,
+        ),
+    ]
+    assert extract_impulse_legs(pivots)
+    assert not extract_impulse_legs_confirmed(pivots, breaks, swing_size=swing)
+
+    bars: list[dict[str, float | int]] = []
+    pattern = (
+        [200.0] * 8
+        + [200.0 - i * 5.0 for i in range(1, 11)]
+        + [150.0] * 6
+        + [150.0 + i * 2.0 for i in range(1, 8)]
+        + [164.0] * 6
+        + [130.0]
+    )
+    for i, c in enumerate(pattern):
+        bars.append(
+            {
+                "open_time": i * 60_000,
+                "open": float(c) - 0.05,
+                "high": float(c) + 0.3,
+                "low": float(c) - 0.3,
+                "close": float(c),
+                "volume": 100.0,
+            }
+        )
+    df = pd.DataFrame(bars)
+    raw_pivots = detect_pivots(df, swing_size=swing)
+    raw_breaks = extract_structure_breaks(df, swing_size=swing, use_close=True)
+    long_confirmed = [
+        leg
+        for leg in extract_impulse_legs_confirmed(
+            raw_pivots, raw_breaks, swing_size=swing
+        )
+        if leg.direction == "LONG"
+    ]
+    setup, event = detect_continuation_prepare(
+        symbol="TEST",
+        htf="1H",
+        htf_df=df,
+        close_time=int(df.iloc[-1]["open_time"]),
+        swing_size=swing,
+        fib_level=0.5,
+        impulse_max_age_bars=len(df),
+        structure_max_bars_ago=len(df),
+    )
+    if long_confirmed:
+        return
+    if setup is not None:
+        assert setup.direction != "LONG"
+    assert event is None or setup is None

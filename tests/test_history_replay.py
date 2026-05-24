@@ -3,8 +3,10 @@ import pandas as pd
 from bot.history_replay import (
     ClosedTrade,
     OpenTrade,
+    _dedupe_overlay_events,
     _filter_invalidated_impulses,
     _max_drawdown_r,
+    _normalize_structure_sequence,
     _resolve_trade_exit,
     _summarize,
 )
@@ -113,3 +115,56 @@ def test_filter_invalidated_impulses_keeps_prepare_referenced_leg() -> None:
     impulses = [e for e in events if e.get("kind") == "IMPULSE"]
     assert len(impulses) == 1
     assert int(impulses[0]["start_open_ms"]) == 60_000
+
+
+def test_normalize_structure_sequence_relabels_same_direction_as_bos() -> None:
+    events = [
+        {"kind": "STRUCTURE", "htf": "1H", "direction": "SHORT", "subkind": "CHOCH"},
+        {"kind": "STRUCTURE", "htf": "1H", "direction": "SHORT", "subkind": "CHOCH"},
+        {"kind": "STRUCTURE", "htf": "1H", "direction": "LONG", "subkind": "BOS"},
+        {"kind": "STRUCTURE", "htf": "1H", "direction": "LONG", "subkind": "CHOCH"},
+        {"kind": "STRUCTURE", "htf": "4H", "direction": "LONG", "subkind": "BOS"},
+    ]
+
+    _normalize_structure_sequence(events)
+
+    assert events[0]["subkind"] == "CHOCH"
+    assert events[1]["subkind"] == "BOS"
+    assert events[2]["subkind"] == "CHOCH"
+    assert events[3]["subkind"] == "BOS"
+    # Другой TF имеет независимую последовательность.
+    assert events[4]["subkind"] == "CHOCH"
+
+
+def test_dedupe_overlay_events_removes_duplicate_pivot() -> None:
+    events = [
+        {
+            "kind": "PIVOT",
+            "symbol": "BTCUSDT",
+            "htf": "1H",
+            "bar_open_ms": 1,
+            "label": "LH",
+            "pivot_kind": "HIGH",
+        },
+        {
+            "kind": "PIVOT",
+            "symbol": "BTCUSDT",
+            "htf": "1H",
+            "bar_open_ms": 1,
+            "label": "LH",
+            "pivot_kind": "HIGH",
+        },
+        {
+            "kind": "STRUCTURE",
+            "symbol": "BTCUSDT",
+            "htf": "1H",
+            "bar_open_ms": 2,
+            "subkind": "CHOCH",
+            "direction": "SHORT",
+            "swing_open_ms": 1,
+        },
+    ]
+    _dedupe_overlay_events(events)
+    assert len(events) == 2
+    assert events[0]["kind"] == "PIVOT"
+    assert events[1]["kind"] == "STRUCTURE"

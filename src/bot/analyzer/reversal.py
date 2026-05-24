@@ -6,7 +6,7 @@ from bot.analyzer.setup_machine import SetupEvent, build_setup, make_setup_id
 from bot.market.pivots import (
     detect_pivots,
     detect_pivots_htf,
-    extract_impulse_legs,
+    extract_impulse_legs_confirmed,
     extract_structure_breaks_htf,
     find_first_touch_idx,
     impulse_invalidated,
@@ -103,7 +103,9 @@ def detect_reversal_prepare(
 
     legs = [
         leg
-        for leg in extract_impulse_legs(pivots)
+        for leg in extract_impulse_legs_confirmed(
+            raw_pivots, breaks, swing_size=swing_size
+        )
         if leg.direction == reversed_impulse_direction and leg.end_idx <= choch_break.broken_idx
     ]
     if not legs:
