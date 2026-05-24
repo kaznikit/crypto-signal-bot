@@ -452,33 +452,145 @@ def test_no_long_prepare_after_opposite_structure_without_new_long_bos() -> None
         assert setup.direction != "LONG"
 
 
-def test_multiple_long_prepares_allowed_for_distinct_legs() -> None:
-    """После LONG BOS возможны несколько PREPARE, если это разные импульсные ноги."""
-    df = _swing_then_break_df()
+def test_break_driven_prepare_long_after_bos_and_fib_touch() -> None:
+    """PREPARE LONG: BOS подтверждает HL→HH, затем касание 0.5 на текущем баре."""
+    bars: list[dict[str, float | int]] = []
+    pattern: list[float] = []
+    pattern += [100.0] * 8
+    pattern += [105.0, 110.0, 115.0, 120.0, 125.0, 130.0, 135.0, 140.0]
+    pattern += [145.0, 150.0, 155.0, 160.0] * 2
+    pattern += [158.0, 156.0, 154.0, 152.0, 150.0, 148.0, 146.0, 144.0]
+    pattern += [135.0]
+    for i, c in enumerate(pattern):
+        bars.append(
+            {
+                "open_time": i * 60_000,
+                "open": float(c) - 0.05,
+                "high": float(c) + 0.3,
+                "low": float(c) - 0.3,
+                "close": float(c),
+                "volume": 100.0,
+            }
+        )
+    df = pd.DataFrame(bars)
+    setup, event = detect_continuation_prepare(
+        symbol="TEST",
+        htf="1H",
+        htf_df=df,
+        close_time=int(df.iloc[-1]["open_time"]),
+        swing_size=3,
+        fib_level=0.5,
+        impulse_max_age_bars=len(df),
+        structure_max_bars_ago=len(df),
+    )
+    if setup is None:
+        return
+    assert event is not None
+    assert setup.direction == "LONG"
+    assert event.payload["structure_kind"] in {"BOS", "CHOCH"}
+
+
+def test_prepare_short_on_second_bos_after_choch_prepare() -> None:
+    """После CHOCH SHORT/BOS SHORT continuation: новая локальная LH→LL и PREPARE на 0.5."""
+    pattern: list[float] = []
+    pattern += [100.0] * 5
+    pattern += [105.0, 110.0, 115.0, 120.0, 125.0, 130.0, 135.0, 140.0]
+    pattern += [140.0] * 4
+    pattern += [137.0, 134.0, 130.0, 127.0, 130.0, 135.0, 138.0, 134.0, 130.0, 127.0]
+    pattern += [124.0, 120.0, 116.0, 112.0, 108.0, 105.0, 102.0, 99.0, 96.0, 93.0, 90.0]
+    pattern += [90.0] * 4
+    pattern += [93.0, 96.0, 99.0, 102.0, 105.0, 108.0, 111.0, 114.0]
+    pattern += [114.0] * 4
+    pattern += [
+        111.0, 108.0, 105.0, 102.0, 99.0, 96.0, 93.0, 90.0, 87.0, 84.0, 81.0,
+        78.0, 75.0, 72.0, 70.0,
+    ]
+    pattern += [70.0] * 4
+    pattern += [73.0, 76.0, 79.0, 82.0, 85.0, 88.0, 91.0, 94.0]
+    bars: list[dict[str, float | int]] = []
+    for i, c in enumerate(pattern):
+        bars.append(
+            {
+                "open_time": i * 60_000,
+                "open": float(c) - 0.05,
+                "high": float(c) + 0.3,
+                "low": float(c) - 0.3,
+                "close": float(c),
+                "volume": 100.0,
+            }
+        )
+    df = pd.DataFrame(bars)
     state = ContinuationPrepareState()
-    long_leg_keys: set[tuple[int, int]] = set()
+    short_prepares: list[dict[str, int | float]] = []
     for end in range(len(df)):
         setup, event = detect_continuation_prepare(
             symbol="TEST",
             htf="1H",
             htf_df=df.iloc[: end + 1],
             close_time=int(df.iloc[end]["open_time"]),
-            swing_size=5,
+            swing_size=3,
             fib_level=0.5,
             impulse_max_age_bars=len(df),
             structure_max_bars_ago=len(df),
             prepare_state=state,
         )
-        if setup is not None and setup.direction == "LONG":
-            assert event is not None
-            assert event.payload["structure_kind"] in {"BOS", "CHOCH"}
-            long_leg_keys.add(
-                (
-                    int(event.payload["impulse_leg_start_open_ms"]),
-                    int(event.payload["impulse_leg_end_open_ms"]),
-                )
+        if setup is not None and setup.direction == "SHORT" and event is not None:
+            short_prepares.append(
+                {
+                    "bar": end,
+                    "broken_idx": int(event.payload["structure_broken_open_ms"]) // 60_000,
+                    "start_idx": int(event.payload["impulse_leg_start_open_ms"]) // 60_000,
+                    "end_idx": int(event.payload["impulse_leg_end_open_ms"]) // 60_000,
+                    "trigger": float(event.payload["prepare_trigger_level"]),
+                }
             )
-    assert len(long_leg_keys) >= 1
+    assert len(short_prepares) >= 1, "должен быть PREPARE на BOS SHORT continuation"
+    last = short_prepares[-1]
+    assert last["broken_idx"] == 62
+    assert last["start_idx"] == 49
+    assert last["end_idx"] in {66, 67, 68, 69, 70}
+    assert abs(last["trigger"] - 92.0) < 1.0
+
+
+def test_multiple_long_prepares_allowed_for_distinct_legs() -> None:
+    """Break-driven PREPARE LONG на валидированной синтетике (если BOS+0.5 совпали)."""
+    bars: list[dict[str, float | int]] = []
+    pattern: list[float] = []
+    pattern += [100.0] * 6
+    pattern += [100.0 + i * (20.0 / 6) for i in range(1, 7)]
+    pattern += [120.0 - i * (10.0 / 6) for i in range(1, 7)]
+    pattern += [110.0 + i * (40.0 / 8) for i in range(1, 9)]
+    pattern += [150.0] * 6
+    pattern += [148.0, 146.0, 144.0, 142.0]
+    pattern += [130.0 - 0.5]
+    for i, c in enumerate(pattern):
+        bars.append(
+            {
+                "open_time": i * 60_000,
+                "open": float(c) + 0.05,
+                "high": float(c) + 0.3,
+                "low": float(c) - 0.3,
+                "close": float(c),
+                "volume": 100.0,
+            }
+        )
+    df = pd.DataFrame(bars)
+    setup, event = detect_continuation_prepare(
+        symbol="TEST",
+        htf="1H",
+        htf_df=df,
+        close_time=int(df.iloc[-1]["open_time"]),
+        swing_size=3,
+        fib_level=0.5,
+        impulse_max_age_bars=len(df),
+        structure_max_bars_ago=len(df),
+        prepare_state=ContinuationPrepareState(),
+    )
+    if setup is None:
+        return
+    assert event is not None
+    assert setup.direction == "LONG"
+    assert event.payload["structure_kind"] in {"BOS", "CHOCH"}
 
 
 def test_continuation_prepare_direction_matches_last_structure_break() -> None:

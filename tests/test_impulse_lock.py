@@ -631,7 +631,7 @@ def test_compute_impulse_lock_uses_confirmed_short_not_phantom_long() -> None:
     )
     assert state is not None
     assert state.leg.direction == "SHORT"
-    assert state.leg.end_idx == 40
+    assert state.leg.end_idx == 20
 
     state_geom = compute_impulse_lock_state(
         df, pivots, swing_size=swing, use_close=True, breaks=None
@@ -641,8 +641,49 @@ def test_compute_impulse_lock_uses_confirmed_short_not_phantom_long() -> None:
     assert state_geom.leg.end_idx == 60
 
 
-def test_two_confirmed_short_impulse_legs() -> None:
-    """Две LH→LL ноги с BOS SHORT в окне — обе в confirmed (второй P SHORT)."""
+def test_two_confirmed_short_impulse_legs_after_fib_touch() -> None:
+    """Две SHORT-ноги сохраняются, если между BOS было касание 0.5 первой ноги."""
+    swing = 3
+    pivots = [
+        Pivot(idx=0, kind="HIGH", price=200.0, label="HH"),
+        Pivot(idx=10, kind="LOW", price=150.0, label="LL"),
+        Pivot(idx=20, kind="HIGH", price=180.0, label="LH"),
+        Pivot(idx=30, kind="LOW", price=120.0, label="LL"),
+        Pivot(idx=40, kind="HIGH", price=160.0, label="LH"),
+        Pivot(idx=50, kind="LOW", price=100.0, label="LL"),
+    ]
+    breaks = [
+        StructureBreak("SHORT", "BOS", swing_idx=20, swing_price=180.0, broken_idx=35),
+        StructureBreak("SHORT", "BOS", swing_idx=40, swing_price=160.0, broken_idx=55),
+    ]
+    bars = []
+    for i, c in enumerate([160.0] * 60):
+        bars.append(
+            {
+                "open_time": i * 60_000,
+                "open": c - 0.05,
+                "high": c + 0.3,
+                "low": c - 0.3,
+                "close": c,
+                "volume": 100.0,
+            }
+        )
+    bars[40]["high"] = 145.0
+    df = __import__("pandas").DataFrame(bars)
+    legs = extract_impulse_legs_confirmed(pivots, breaks, swing_size=swing, df=df)
+    short_legs = [leg for leg in legs if leg.direction == "SHORT"]
+    assert len(short_legs) == 2
+    assert short_legs[0].end_idx == 30
+    assert short_legs[1].end_idx == 50
+
+
+def test_confirmed_short_impulse_resets_without_fib_touch() -> None:
+    """Повторный BOS SHORT без 0.5 оставляет только актуальную reset-ногу.
+
+    Каждый новый BOS строит локально-тесную ногу LH→LL текущего сегмента.
+    Без касания fib_half предыдущая нога сбрасывается, остаётся только
+    самая свежая (LH@40 → LL@50, anchor — последний BOS).
+    """
     swing = 3
     pivots = [
         Pivot(idx=0, kind="HIGH", price=200.0, label="HH"),
@@ -659,6 +700,54 @@ def test_two_confirmed_short_impulse_legs() -> None:
     ]
     legs = extract_impulse_legs_confirmed(pivots, breaks, swing_size=swing)
     short_legs = [leg for leg in legs if leg.direction == "SHORT"]
-    assert len(short_legs) == 2
-    assert short_legs[0].end_idx == 30
-    assert short_legs[1].end_idx == 50
+    assert len(short_legs) == 1
+    assert short_legs[0].start_idx == 40
+    assert short_legs[0].end_idx == 50
+    assert short_legs[0].anchor_break_idx == 45
+
+
+def test_filter_pivots_keeps_only_deepest_retrace() -> None:
+    """В lock-окне остаётся один retrace-пивот — самый глубокий HL."""
+    lock = ImpulseLockState(
+        leg=ImpulseLeg("LONG", 0, 100.0, 10, 130.0),
+        lock_from_idx=13,
+        broken_start_idx=-1,
+        broken_end_idx=-1,
+    )
+    hl_shallow = Pivot(idx=15, kind="LOW", price=115.0, label="HL")
+    hl_deep = Pivot(idx=20, kind="LOW", price=105.0, label="HL")
+    hl_very_shallow = Pivot(idx=18, kind="LOW", price=118.0, label="HL")
+    legs = [lock.leg]
+    pivots = [
+        Pivot(idx=0, kind="LOW", price=100.0, label="HL"),
+        Pivot(idx=10, kind="HIGH", price=130.0, label="HH"),
+        hl_shallow,
+        hl_deep,
+        hl_very_shallow,
+    ]
+    filtered = filter_pivots_by_impulse_lock(pivots, lock, impulse_legs=legs)
+    retrace_in_lock = [p for p in filtered if p.idx > lock.leg.end_idx]
+    assert len(retrace_in_lock) == 1
+    assert retrace_in_lock[0] == hl_deep
+
+
+def test_filter_pivots_keeps_anchors_plus_one_retrace() -> None:
+    """На импульс: start + end + один deepest retrace = 3 метки."""
+    lock = ImpulseLockState(
+        leg=ImpulseLeg("SHORT", 0, 200.0, 10, 150.0),
+        lock_from_idx=13,
+        broken_start_idx=-1,
+        broken_end_idx=-1,
+    )
+    lh_shallow = Pivot(idx=15, kind="HIGH", price=170.0, label="LH")
+    lh_deep = Pivot(idx=20, kind="HIGH", price=185.0, label="LH")
+    legs = [lock.leg]
+    pivots = [
+        Pivot(idx=0, kind="HIGH", price=200.0, label="LH"),
+        Pivot(idx=10, kind="LOW", price=150.0, label="LL"),
+        lh_shallow,
+        lh_deep,
+    ]
+    filtered = filter_pivots_by_impulse_lock(pivots, lock, impulse_legs=legs)
+    assert len(filtered) == 3
+    assert {p.idx for p in filtered} == {0, 10, 20}

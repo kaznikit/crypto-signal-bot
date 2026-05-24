@@ -104,9 +104,11 @@ def detect_reversal_prepare(
     legs = [
         leg
         for leg in extract_impulse_legs_confirmed(
-            raw_pivots, breaks, swing_size=swing_size
+            raw_pivots, breaks, swing_size=swing_size, df=htf_df
         )
-        if leg.direction == reversed_impulse_direction and leg.end_idx <= choch_break.broken_idx
+        if leg.direction == reversed_impulse_direction
+        and leg.anchor_break_idx is not None
+        and leg.anchor_break_idx <= choch_break.broken_idx
     ]
     if not legs:
         _funnel_inc(funnel, "no_reversed_impulse_leg")

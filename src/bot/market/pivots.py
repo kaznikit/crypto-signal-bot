@@ -13,10 +13,10 @@
   баров после самого пивота.
 * **Каждый пивот сразу классифицируется** как HH / LH (для HIGH-пивотов) и
   HL / LL (для LOW-пивотов) сравнением с предыдущим пивотом своего типа.
-* **Импульс** = leg HL→HH (LONG) или LH→LL (SHORT). Это «expansion» после
-  коррекции; точно та же логика, по которой Pine-индикатор рисует 0.5-линию
-  только между HL и HH (или LH и LL). Развороты тренда (LL→HH, HH→LL) сами по
-  себе импульсами не считаются — это уже область CHoCH-маркеров.
+* **Импульс** = leg HL→HH (LONG) или LH→LL (SHORT), **подтверждённый** BOS/CHoCH
+  той же стороны. ``end`` = последний pivot-экстремум до ``broken_idx``,
+  ``start`` = ближайший противоположный pivot. Повторный BOS без касания
+  ``fib_half`` сбрасывает предыдущую ногу (reset start/end).
 * **BOS/CHoCH** — единственный активный ``prevHigh`` (или ``prevLow``).
   Появление нового пивота активирует уровень; первое close-пересечение
   деактивирует и эмитит событие. Если предыдущее событие было в обратную
@@ -61,6 +61,7 @@ class ImpulseLeg:
     (HL для LONG, LH для SHORT). Это invalidation для continuation-сетапа.
     ``end_idx``/``end_price`` — бар и цена «экспансионного» пивота (HH / LL).
     Это пик импульса; от него тянется fib-сетка.
+    ``anchor_break_idx`` — бар BOS/CHoCH, подтвердивший ногу (break-driven).
     """
 
     direction: str  # "LONG" | "SHORT"
@@ -68,6 +69,7 @@ class ImpulseLeg:
     start_price: float
     end_idx: int
     end_price: float
+    anchor_break_idx: int | None = None
 
     @property
     def fib_half(self) -> float:
@@ -180,30 +182,206 @@ def extract_impulse_legs(pivots: list[Pivot]) -> list[ImpulseLeg]:
     return legs
 
 
+def _last_pivot_before(
+    pivots: list[Pivot],
+    *,
+    before_idx: int,
+    min_idx: int = -1,
+    kind: str | None = None,
+    label: str | None = None,
+) -> Pivot | None:
+    for pivot in reversed(pivots):
+        if pivot.idx >= before_idx:
+            continue
+        if min_idx >= 0 and pivot.idx < min_idx:
+            continue
+        if kind is not None and pivot.kind != kind:
+            continue
+        if label is not None and pivot.label != label:
+            continue
+        return pivot
+    return None
+
+
+def _first_pivot_after_breaking_threshold(
+    pivots: list[Pivot],
+    *,
+    after_idx: int,
+    kind: str,
+    direction: str,
+    threshold_price: float,
+) -> Pivot | None:
+    """Первый pivot после ``after_idx``, пробивший ``threshold_price``.
+
+    Для ``direction == "SHORT"`` (``kind == "LOW"``) ищем первый LOW с
+    ``price < threshold_price``. Для ``LONG`` (``kind == "HIGH"``) — первый
+    HIGH с ``price > threshold_price``. Возвращает pivot с минимальной
+    ``idx`` (хронологически первый), чтобы не «забегать вперёд» в будущие
+    более глубокие пивоты следующего сегмента тренда.
+    """
+    for pivot in pivots:
+        if pivot.idx <= after_idx:
+            continue
+        if pivot.kind != kind:
+            continue
+        if direction == "SHORT" and pivot.price < threshold_price:
+            return pivot
+        if direction == "LONG" and pivot.price > threshold_price:
+            return pivot
+    return None
+
+
+def _build_leg_from_break(
+    pivots: list[Pivot],
+    br: StructureBreak,
+    *,
+    min_idx: int = -1,
+) -> ImpulseLeg | None:
+    """Собрать импульсную ногу от BOS/CHoCH.
+
+    Для **первого** break в направлении (``min_idx < 0``) end = последний
+    экстремум до break (broken pivot).
+
+    Для **continuation** (``min_idx >= 0``) end = deepest pivot после ``min_idx``
+    (новый, более глубокий LL/HH в пределах текущего трендового сегмента),
+    даже если он находится после ``broken_idx`` (новая нога формируется по мере
+    роста/падения после пробоя). Без локального LH/HL между ``min_idx`` и
+    ``end_pivot.idx`` нога не строится — fallback на старые HH/LL отключён,
+    нога сформируется позже, когда новый pivot подтвердится.
+    """
+    if br.direction == "LONG":
+        end_kind, start_kind = "HIGH", "LOW"
+        preferred_start_label = "HL"
+    else:
+        end_kind, start_kind = "LOW", "HIGH"
+        preferred_start_label = "LH"
+
+    if min_idx >= 0:
+        end_pivot = _first_pivot_after_breaking_threshold(
+            pivots,
+            after_idx=br.broken_idx,
+            kind=end_kind,
+            direction=br.direction,
+            threshold_price=br.swing_price,
+        )
+        if end_pivot is None:
+            end_pivot = _last_pivot_before(
+                pivots, before_idx=br.broken_idx, min_idx=min_idx, kind=end_kind
+            )
+    else:
+        end_pivot = _last_pivot_before(
+            pivots, before_idx=br.broken_idx, min_idx=min_idx, kind=end_kind
+        )
+    if end_pivot is None:
+        return None
+
+    start_pivot = _last_pivot_before(
+        pivots,
+        before_idx=end_pivot.idx,
+        min_idx=min_idx,
+        kind=start_kind,
+        label=preferred_start_label,
+    )
+    if start_pivot is None and min_idx < 0:
+        start_pivot = _last_pivot_before(
+            pivots, before_idx=end_pivot.idx, min_idx=min_idx, kind=start_kind
+        )
+    if start_pivot is None:
+        return None
+
+    if br.direction == "LONG" and end_pivot.price <= start_pivot.price:
+        return None
+    if br.direction == "SHORT" and end_pivot.price >= start_pivot.price:
+        return None
+
+    return ImpulseLeg(
+        direction=br.direction,
+        start_idx=start_pivot.idx,
+        start_price=start_pivot.price,
+        end_idx=end_pivot.idx,
+        end_price=end_pivot.price,
+        anchor_break_idx=br.broken_idx,
+    )
+
+
+def _fib_half_touched_between(
+    df: pd.DataFrame | None,
+    leg: ImpulseLeg,
+    *,
+    after_idx: int,
+    before_idx: int,
+) -> bool:
+    """True, если между ``after_idx`` и ``before_idx`` цена коснулась ``fib_half``."""
+    if df is None or df.empty or after_idx >= before_idx:
+        return False
+    level = leg.fib_half
+    sub = df.iloc[after_idx + 1 : before_idx + 1]
+    if sub.empty:
+        return False
+    if leg.direction == "LONG":
+        return bool((sub["low"] <= level).any())
+    return bool((sub["high"] >= level).any())
+
+
 def extract_impulse_legs_confirmed(
     pivots: list[Pivot],
     breaks: list[StructureBreak],
     *,
     swing_size: int,
+    df: pd.DataFrame | None = None,
 ) -> list[ImpulseLeg]:
-    """HL→HH / LH→LL только при подтверждающем BOS/CHOCH той же стороны.
+    """Break-driven импульсы: нога подтверждается BOS/CHoCH той же стороны.
 
-    Подтверждающий пробой должен быть рядом с завершением ноги:
-    ``[leg.end_idx - 2 * swing_size, leg.end_idx + swing_size]``.
-    Это исключает «старыe» пробои внутри длинного отката, когда реального
-    структурного подтверждения у текущего импульса уже нет.
+    Для каждого BOS/CHoCH строится нога от последних релевантных пивотов до
+    ``broken_idx``. Если до следующего пробоя в ту же сторону не было касания
+    ``fib_half`` предыдущей ноги, старая нога сбрасывается (reset start/end).
+
+    ``swing_size`` сохранён для обратной совместимости сигнатуры.
     """
-    out: list[ImpulseLeg] = []
-    for leg in extract_impulse_legs(pivots):
-        window_start = max(0, leg.end_idx - 2 * swing_size)
-        window_end = leg.end_idx + swing_size
-        if any(
-            br.direction == leg.direction
-            and window_start <= br.broken_idx <= window_end
-            for br in breaks
-        ):
-            out.append(leg)
-    return out
+    _ = swing_size
+    if not breaks or not pivots:
+        return []
+
+    sorted_breaks = sorted(breaks, key=lambda b: (b.broken_idx, b.swing_idx))
+    confirmed: list[ImpulseLeg] = []
+    active_by_dir: dict[str, ImpulseLeg | None] = {"LONG": None, "SHORT": None}
+    last_anchor_idx_by_dir: dict[str, int] = {"LONG": -1, "SHORT": -1}
+    seen: set[tuple[int, int, str, int]] = set()
+
+    for br in sorted_breaks:
+        if br.kind not in ("BOS", "CHOCH"):
+            continue
+
+        min_idx = last_anchor_idx_by_dir.get(br.direction, -1)
+        leg = _build_leg_from_break(pivots, br, min_idx=min_idx)
+        if leg is None:
+            continue
+
+        prev_active = active_by_dir.get(br.direction)
+        if prev_active is not None and prev_active.anchor_break_idx is not None:
+            touched = _fib_half_touched_between(
+                df,
+                prev_active,
+                after_idx=prev_active.end_idx,
+                before_idx=br.broken_idx,
+            )
+            if not touched:
+                confirmed = [
+                    existing
+                    for existing in confirmed
+                    if existing.anchor_break_idx != prev_active.anchor_break_idx
+                ]
+
+        key = (leg.start_idx, leg.end_idx, leg.direction, leg.anchor_break_idx or -1)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        confirmed.append(leg)
+        active_by_dir[br.direction] = leg
+        last_anchor_idx_by_dir[br.direction] = br.broken_idx
+
+    return confirmed
 
 
 def extract_all_pivot_legs(pivots: list[Pivot]) -> list[ImpulseLeg]:
@@ -356,6 +534,7 @@ def latest_impulse_leg(
     direction: str | None = None,
     breaks: list[StructureBreak] | None = None,
     swing_size: int = 1,
+    df: pd.DataFrame | None = None,
 ) -> ImpulseLeg | None:
     """Последний impulse leg в указанном направлении (или вообще последний).
 
@@ -364,7 +543,7 @@ def latest_impulse_leg(
     """
     if breaks is not None:
         legs = extract_impulse_legs_confirmed(
-            pivots, breaks, swing_size=swing_size
+            pivots, breaks, swing_size=swing_size, df=df
         )
     else:
         legs = extract_impulse_legs(pivots)
@@ -440,10 +619,11 @@ def compute_impulse_lock_state(
     Передайте ``breaks`` (сырой ``extract_structure_breaks``), чтобы lock строился
     только на импульсах, подтверждённых BOS/CHoCH.
     """
-    leg = latest_impulse_leg(pivots, breaks=breaks, swing_size=swing_size)
+    leg = latest_impulse_leg(pivots, breaks=breaks, swing_size=swing_size, df=df)
     if leg is None:
         return None
-    lock_from_idx = leg.end_idx + swing_size
+    confirm_idx = leg.anchor_break_idx if leg.anchor_break_idx is not None else leg.end_idx
+    lock_from_idx = max(leg.end_idx + swing_size, confirm_idx + 1)
     last_idx = int(df.index[-1])
     if last_idx < lock_from_idx:
         return None
@@ -605,23 +785,90 @@ def _pivot_allowed_under_impulse_lock(
     return False
 
 
+def _is_valid_retrace_for_leg(pivot: Pivot, leg: ImpulseLeg) -> bool:
+    """True если pivot — валидный коррекционный pivot для ноги (между start и end)."""
+    if leg.direction == "LONG" and pivot.kind == "LOW":
+        return leg.start_price <= pivot.price < leg.end_price
+    if leg.direction == "SHORT" and pivot.kind == "HIGH":
+        return leg.end_price < pivot.price <= leg.start_price
+    return False
+
+
+def _deepest_retrace_idxs_per_leg(
+    pivots: list[Pivot],
+    legs: list[ImpulseLeg],
+    *,
+    anchors: set[int],
+) -> set[int]:
+    """Самый глубокий коррекционный pivot для каждой ноги (1 retrace-метка на импульс).
+
+    Pivot привязывается к ноге через ``impulse_leg_for_retracement_pivot``
+    (последняя нога того же направления, закончившаяся до бара pivot).
+    Внутри группы выбирается deepest: min по цене для LONG, max для SHORT.
+    """
+    if not legs:
+        return set()
+    candidates_by_leg: dict[int, list[Pivot]] = {}
+    for pivot in pivots:
+        if pivot.idx in anchors:
+            continue
+        ref = impulse_leg_for_retracement_pivot(pivot, legs)
+        if ref is None:
+            continue
+        if not _is_valid_retrace_for_leg(pivot, ref):
+            continue
+        candidates_by_leg.setdefault(ref.end_idx, []).append(pivot)
+
+    leg_by_end: dict[int, ImpulseLeg] = {leg.end_idx: leg for leg in legs}
+    deepest_idxs: set[int] = set()
+    for end_idx, group in candidates_by_leg.items():
+        leg = leg_by_end.get(end_idx)
+        if leg is None or not group:
+            continue
+        if leg.direction == "LONG":
+            deepest = min(group, key=lambda p: p.price)
+        else:
+            deepest = max(group, key=lambda p: p.price)
+        deepest_idxs.add(deepest.idx)
+    return deepest_idxs
+
+
 def filter_pivots_by_impulse_lock(
     pivots: list[Pivot],
     state: ImpulseLockState | None,
     *,
     impulse_legs: list[ImpulseLeg] | None = None,
 ) -> list[Pivot]:
+    """Оставить на overlay только anchors импульсов и по 1 deepest-retrace на ногу.
+
+    Каждый подтверждённый импульс представлен ровно тремя метками: ``start``,
+    ``end`` (anchors) и самый глубокий коррекционный pivot между его ``end_idx``
+    и началом следующей одноимённой ноги (или до конца истории). Лишние
+    промежуточные HL/LH между BOS/CHOCH отбрасываются. После инвалидации
+    активного импульса (``broken_start_idx >= 0``) дополнительно показываем
+    pivots, формирующие новый тренд (LH после слома HL и т.п.).
+    """
     if state is None:
         return pivots
     legs = impulse_legs if impulse_legs is not None else extract_impulse_legs(pivots)
     anchors = impulse_leg_anchor_idxs(legs)
-    return [
-        p
-        for p in pivots
-        if _pivot_allowed_under_impulse_lock(
-            p, state, anchor_idxs=anchors, impulse_legs=legs
-        )
-    ]
+    deepest_idxs = _deepest_retrace_idxs_per_leg(pivots, legs, anchors=anchors)
+
+    out: list[Pivot] = []
+    for pivot in pivots:
+        if pivot.idx in anchors:
+            out.append(pivot)
+            continue
+        if pivot.idx in deepest_idxs:
+            out.append(pivot)
+            continue
+        if state.broken_start_idx >= 0 and pivot.idx >= state.broken_start_idx:
+            if _pivot_allowed_under_impulse_lock(
+                pivot, state, anchor_idxs=anchors, impulse_legs=legs
+            ):
+                out.append(pivot)
+            continue
+    return out
 
 
 def _structure_break_allowed_under_impulse_lock(
@@ -630,6 +877,12 @@ def _structure_break_allowed_under_impulse_lock(
 ) -> bool:
     if br.broken_idx <= state.leg.end_idx:
         return True
+    if (
+        state.leg.anchor_break_idx is not None
+        and br.direction == state.leg.direction
+        and br.broken_idx < state.leg.anchor_break_idx
+    ):
+        return False
     opposite = "SHORT" if state.leg.direction == "LONG" else "LONG"
     if state.broken_start_idx < 0 and state.broken_end_idx < 0:
         # Во время ретрейса после импульса разрешаем только явный CHOCH по
@@ -869,7 +1122,7 @@ def detect_pivots_htf(
         df, swing_size=swing_size, use_close=use_close
     )
     legs = extract_impulse_legs_confirmed(
-        pivots, breaks_raw, swing_size=swing_size
+        pivots, breaks_raw, swing_size=swing_size, df=df
     )
     state = compute_impulse_lock_state(
         df,

@@ -154,8 +154,11 @@ def detect_continuation_prepare(
     # Только настоящие импульсные ноги HL→HH (LONG) / LH→LL (SHORT). Pine-эталон
     # рисует P/0.5-линию ровно для них. Любые HIGH↔LOW (например HH→первый
     # новый low после CHOCH) дают ложный P SHORT до подтверждения LH.
+    # Используем полный список break'ов (без causal-фильтра) — он нужен для
+    # корректного chaining min_idx между подтверждёнными ногами одного тренда.
+    # Continuation эмиссия всё равно работает только по causal ``last_break``.
     legs = extract_impulse_legs_confirmed(
-        raw_pivots, breaks_all, swing_size=swing_size
+        raw_pivots, breaks_all, swing_size=swing_size, df=htf_df
     )
     if not legs:
         return None, None
@@ -167,8 +170,8 @@ def detect_continuation_prepare(
         if cand.direction != structure_direction:
             _funnel_inc(funnel, "leg_direction_misaligned")
             continue
-        if cand.end_idx < last_break.broken_idx:
-            _funnel_inc(funnel, "leg_before_structure_break")
+        if cand.anchor_break_idx != last_break.broken_idx:
+            _funnel_inc(funnel, "leg_not_confirmed_by_anchor_break")
             continue
         if last_pos - cand.end_idx > impulse_max_age_bars:
             _funnel_inc(funnel, "leg_too_old")

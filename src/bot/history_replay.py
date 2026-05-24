@@ -171,9 +171,9 @@ def _emit_fresh_pivot_events(
     * **PIVOT** — HH/LH/HL/LL-метка. Пивот подтверждается через ``swing_size``
       баров после самого пивота, поэтому на текущем баре в `events_out`
       кладётся пивот, попавший на ``last_pos - swing_size``.
-    * **IMPULSE** — leg HL→HH (LONG) или LH→LL (SHORT), у которого
-      экспансионный пивот (HH / LL) подтвердился ровно на этом баре. На
-      overlay = диагональ + 0.5-линия.
+    * **IMPULSE** — leg HL→HH (LONG) или LH→LL (SHORT), подтверждённая BOS/CHoCH
+      на текущем баре (``anchor_break_idx == last_pos``). На overlay = диагональ
+      + 0.5-линия.
     * **STRUCTURE** — BOS / CHoCH (первое close-пересечение активного
       prevHigh/prevLow). Эмитится мгновенно, без задержки на ``swing_size``.
     """
@@ -189,7 +189,7 @@ def _emit_fresh_pivot_events(
         df, swing_size=swing_size, use_close=bos_use_close, impulse_lock=True
     )
     impulse_legs = extract_impulse_legs_confirmed(
-        raw_pivots, visible_breaks, swing_size=swing_size
+        raw_pivots, visible_breaks, swing_size=swing_size, df=df
     )
     lock_state = compute_impulse_lock_state(
         df,
@@ -226,7 +226,7 @@ def _emit_fresh_pivot_events(
         )
 
     for leg in impulse_legs:
-        if leg.end_idx != confirm_idx:
+        if leg.anchor_break_idx != last_pos:
             continue
         events_out.append(
             {

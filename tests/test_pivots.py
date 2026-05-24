@@ -134,8 +134,8 @@ def test_extract_impulse_legs_only_hl_to_hh_and_lh_to_ll() -> None:
     )
 
 
-def test_extract_impulse_legs_confirmed_requires_same_dir_break_in_window() -> None:
-    """Импульс без BOS/CHoCH в окне формирования не попадает в confirmed."""
+def test_extract_impulse_legs_confirmed_break_driven_from_bos() -> None:
+    """Импульс подтверждается BOS/CHOCH: end = последний экстремум до break."""
     swing = 3
     pivots = [
         Pivot(idx=0, kind="LOW", price=100.0, label="HL"),
@@ -144,47 +144,210 @@ def test_extract_impulse_legs_confirmed_requires_same_dir_break_in_window() -> N
         Pivot(idx=30, kind="HIGH", price=110.0, label="LH"),
         Pivot(idx=40, kind="LOW", price=80.0, label="LL"),
     ]
-    long_leg = ImpulseLeg("LONG", 0, 100.0, 10, 120.0)
-    short_leg = ImpulseLeg("SHORT", 30, 110.0, 40, 80.0)
 
-    bos_long_in_window = StructureBreak(
+    bos_long = StructureBreak(
         direction="LONG",
         kind="BOS",
-        swing_idx=5,
-        swing_price=115.0,
-        broken_idx=8,
+        swing_idx=10,
+        swing_price=120.0,
+        broken_idx=15,
     )
     confirmed = extract_impulse_legs_confirmed(
-        pivots, [bos_long_in_window], swing_size=swing
+        pivots, [bos_long], swing_size=swing
     )
-    assert long_leg in confirmed
-    assert short_leg not in confirmed
+    assert confirmed == [
+        ImpulseLeg(
+            direction="LONG",
+            start_idx=0,
+            start_price=100.0,
+            end_idx=10,
+            end_price=120.0,
+            anchor_break_idx=15,
+        )
+    ]
 
     assert extract_impulse_legs_confirmed(pivots, [], swing_size=swing) == []
 
-    bos_short_only = StructureBreak(
+    bos_short = StructureBreak(
         direction="SHORT",
         kind="BOS",
         swing_idx=30,
         swing_price=110.0,
         broken_idx=38,
     )
-    confirmed2 = extract_impulse_legs_confirmed(
-        pivots, [bos_short_only], swing_size=swing
+    confirmed_short = extract_impulse_legs_confirmed(
+        pivots, [bos_short], swing_size=swing
     )
-    assert long_leg not in confirmed2
-    assert short_leg in confirmed2
+    assert confirmed_short == [
+        ImpulseLeg(
+            direction="SHORT",
+            start_idx=10,
+            start_price=120.0,
+            end_idx=20,
+            end_price=90.0,
+            anchor_break_idx=38,
+        )
+    ]
 
-    bos_long_after_window = StructureBreak(
+
+def test_extract_impulse_legs_confirmed_delayed_bos_after_retracement() -> None:
+    """BOS после отката всё равно подтверждает ногу до break (не «окно у end»)."""
+    swing = 3
+    pivots = [
+        Pivot(idx=0, kind="LOW", price=100.0, label="HL"),
+        Pivot(idx=10, kind="HIGH", price=120.0, label="HH"),
+    ]
+    bos_delayed = StructureBreak(
         direction="LONG",
         kind="BOS",
-        swing_idx=5,
-        swing_price=115.0,
-        broken_idx=20,
+        swing_idx=10,
+        swing_price=120.0,
+        broken_idx=25,
     )
-    assert long_leg not in extract_impulse_legs_confirmed(
-        pivots, [bos_long_after_window], swing_size=swing
+    confirmed = extract_impulse_legs_confirmed(
+        pivots, [bos_delayed], swing_size=swing
     )
+    assert confirmed == [
+        ImpulseLeg(
+            direction="LONG",
+            start_idx=0,
+            start_price=100.0,
+            end_idx=10,
+            end_price=120.0,
+            anchor_break_idx=25,
+        )
+    ]
+
+
+def test_extract_impulse_legs_confirmed_resets_without_fib_touch() -> None:
+    """Повторный BOS без касания 0.5 сбрасывает предыдущую ногу."""
+    swing = 3
+    pivots = [
+        Pivot(idx=0, kind="LOW", price=100.0, label="HL"),
+        Pivot(idx=10, kind="HIGH", price=120.0, label="HH"),
+        Pivot(idx=20, kind="LOW", price=110.0, label="HL"),
+        Pivot(idx=30, kind="HIGH", price=140.0, label="HH"),
+    ]
+    breaks = [
+        StructureBreak("LONG", "BOS", swing_idx=10, swing_price=120.0, broken_idx=15),
+        StructureBreak("LONG", "BOS", swing_idx=30, swing_price=140.0, broken_idx=35),
+    ]
+    bars = []
+    for i, c in enumerate([100.0] * 11 + [115.0] * 24):
+        bars.append(
+            {
+                "open_time": i * 60_000,
+                "open": c - 0.05,
+                "high": c + 0.3,
+                "low": c - 0.3,
+                "close": c,
+                "volume": 100.0,
+            }
+        )
+    df = pd.DataFrame(bars)
+    confirmed = extract_impulse_legs_confirmed(
+        pivots, breaks, swing_size=swing, df=df
+    )
+    assert confirmed == [
+        ImpulseLeg(
+            direction="LONG",
+            start_idx=20,
+            start_price=110.0,
+            end_idx=30,
+            end_price=140.0,
+            anchor_break_idx=35,
+        )
+    ]
+
+
+def test_extract_impulse_legs_confirmed_keeps_both_legs_after_fib_touch() -> None:
+    """Если 0.5 было достигнуто, повторный BOS не сбрасывает предыдущую ногу."""
+    swing = 3
+    pivots = [
+        Pivot(idx=0, kind="LOW", price=100.0, label="HL"),
+        Pivot(idx=10, kind="HIGH", price=120.0, label="HH"),
+        Pivot(idx=20, kind="LOW", price=110.0, label="HL"),
+        Pivot(idx=30, kind="HIGH", price=140.0, label="HH"),
+    ]
+    breaks = [
+        StructureBreak("LONG", "BOS", swing_idx=10, swing_price=120.0, broken_idx=15),
+        StructureBreak("LONG", "BOS", swing_idx=30, swing_price=140.0, broken_idx=35),
+    ]
+    bars = []
+    for i, c in enumerate([100.0] * 16 + [110.0] + [130.0] * 19):
+        bars.append(
+            {
+                "open_time": i * 60_000,
+                "open": c - 0.05,
+                "high": c + 0.3,
+                "low": c - 0.3,
+                "close": c,
+                "volume": 100.0,
+            }
+        )
+    df = pd.DataFrame(bars)
+    confirmed = extract_impulse_legs_confirmed(
+        pivots, breaks, swing_size=swing, df=df
+    )
+    assert len(confirmed) == 2
+    assert confirmed[0].anchor_break_idx == 15
+    assert confirmed[1].anchor_break_idx == 35
+
+
+def test_extract_impulse_legs_confirmed_subsequent_bos_uses_local_pivots() -> None:
+    """Повторный BOS SHORT строит ногу из локальных LH/LL, не из старой HH."""
+    swing = 3
+    pivots = [
+        Pivot(idx=0, kind="HIGH", price=200.0, label="HH"),
+        Pivot(idx=10, kind="LOW", price=150.0, label="LL"),
+        Pivot(idx=20, kind="HIGH", price=170.0, label="LH"),
+        Pivot(idx=30, kind="LOW", price=120.0, label="LL"),
+        Pivot(idx=35, kind="HIGH", price=165.0, label="LH"),
+        Pivot(idx=45, kind="LOW", price=100.0, label="LL"),
+    ]
+    breaks = [
+        StructureBreak("SHORT", "CHOCH", swing_idx=20, swing_price=170.0, broken_idx=35),
+        StructureBreak("SHORT", "BOS", swing_idx=35, swing_price=165.0, broken_idx=50),
+    ]
+    bars = []
+    for i, c in enumerate([160.0] * 36 + [145.0] * 15):
+        bars.append(
+            {
+                "open_time": i * 60_000,
+                "open": c - 0.05,
+                "high": c + 0.3,
+                "low": c - 0.3,
+                "close": c,
+                "volume": 100.0,
+            }
+        )
+    df = pd.DataFrame(bars)
+    legs = extract_impulse_legs_confirmed(pivots, breaks, swing_size=swing, df=df)
+    short_legs = [leg for leg in legs if leg.direction == "SHORT"]
+    assert len(short_legs) == 2
+    assert short_legs[0].start_idx == 20
+    assert short_legs[0].end_idx == 30
+    assert short_legs[0].anchor_break_idx == 35
+    assert short_legs[1].start_idx == 35
+    assert short_legs[1].end_idx == 45
+    assert short_legs[1].anchor_break_idx == 50
+    assert short_legs[1].start_idx != 0
+
+
+def test_extract_impulse_legs_confirmed_skips_when_no_local_start_pivot() -> None:
+    """Без локального LH/HL после предыдущего break нога не строится."""
+    swing = 3
+    pivots = [
+        Pivot(idx=20, kind="HIGH", price=170.0, label="LH"),
+        Pivot(idx=30, kind="LOW", price=120.0, label="LL"),
+        Pivot(idx=45, kind="LOW", price=100.0, label="LL"),
+    ]
+    breaks = [
+        StructureBreak("SHORT", "CHOCH", swing_idx=20, swing_price=170.0, broken_idx=35),
+        StructureBreak("SHORT", "BOS", swing_idx=30, swing_price=120.0, broken_idx=40),
+    ]
+    legs = extract_impulse_legs_confirmed(pivots, breaks, swing_size=swing)
+    assert not any(leg.anchor_break_idx == 40 for leg in legs)
 
 
 def test_impulse_leg_fib_half_is_midprice() -> None:
