@@ -210,17 +210,53 @@ def _first_pivot_after_breaking_threshold(
     kind: str,
     direction: str,
     threshold_price: float,
+    before_idx: int | None = None,
 ) -> Pivot | None:
-    """Первый pivot после ``after_idx``, пробивший ``threshold_price``.
+    """Первый pivot в окне ``(after_idx, before_idx)``, пробивший ``threshold_price``.
 
     Для ``direction == "SHORT"`` (``kind == "LOW"``) ищем первый LOW с
     ``price < threshold_price``. Для ``LONG`` (``kind == "HIGH"``) — первый
-    HIGH с ``price > threshold_price``. Возвращает pivot с минимальной
-    ``idx`` (хронологически первый), чтобы не «забегать вперёд» в будущие
-    более глубокие пивоты следующего сегмента тренда.
+    HIGH с ``price > threshold_price``. ``before_idx`` (если задан) ограничивает
+    поиск сверху, чтобы не «забегать вперёд» в pivot, принадлежащий следующему
+    одноимённому break (он будет привязан к нему).
     """
     for pivot in pivots:
         if pivot.idx <= after_idx:
+            continue
+        if before_idx is not None and pivot.idx >= before_idx:
+            break
+        if pivot.kind != kind:
+            continue
+        if direction == "SHORT" and pivot.price < threshold_price:
+            return pivot
+        if direction == "LONG" and pivot.price > threshold_price:
+            return pivot
+    return None
+
+
+def _last_pivot_before_breaking_threshold(
+    pivots: list[Pivot],
+    *,
+    before_idx: int,
+    min_idx: int,
+    kind: str,
+    direction: str,
+    threshold_price: float,
+    after_idx: int = -1,
+) -> Pivot | None:
+    """Последний pivot ``до`` ``before_idx``, пробивший ``threshold_price``.
+
+    ``after_idx`` (если задан) дополнительно ограничивает поиск снизу: pivot'ы
+    с ``idx <= after_idx`` не рассматриваются. Это нужно, чтобы end ноги текущего
+    break не «крал» end-pivot уже подтверждённой предыдущей ноги того же
+    направления.
+    """
+    for pivot in reversed(pivots):
+        if pivot.idx >= before_idx:
+            continue
+        if min_idx >= 0 and pivot.idx < min_idx:
+            continue
+        if after_idx >= 0 and pivot.idx <= after_idx:
             continue
         if pivot.kind != kind:
             continue
@@ -236,18 +272,20 @@ def _build_leg_from_break(
     br: StructureBreak,
     *,
     min_idx: int = -1,
+    next_same_dir_break_idx: int | None = None,
+    min_end_idx: int = -1,
 ) -> ImpulseLeg | None:
     """Собрать импульсную ногу от BOS/CHoCH.
 
-    Для **первого** break в направлении (``min_idx < 0``) end = последний
-    экстремум до break (broken pivot).
+    End ноги — это **новый** экстремум, в сторону пробоя относительно
+    ``br.swing_price`` (для LONG — HIGH с ``price > swing_price``; для SHORT —
+    LOW с ``price < swing_price``). Если такой pivot ещё не подтверждён, нога
+    не строится — fallback'ом служит сам ``swing pivot`` (последний экстремум
+    до пробоя в том же направлении сегмента).
 
-    Для **continuation** (``min_idx >= 0``) end = deepest pivot после ``min_idx``
-    (новый, более глубокий LL/HH в пределах текущего трендового сегмента),
-    даже если он находится после ``broken_idx`` (новая нога формируется по мере
-    роста/падения после пробоя). Без локального LH/HL между ``min_idx`` и
-    ``end_pivot.idx`` нога не строится — fallback на старые HH/LL отключён,
-    нога сформируется позже, когда новый pivot подтвердится.
+    Start ищется как последний коррекционный pivot до ``end_pivot.idx``: для
+    LONG — HL, для SHORT — LH. Если ``min_idx >= 0`` (continuation), поиск
+    ограничен текущим трендовым сегментом и fallback на старые HH/LL отключён.
     """
     if br.direction == "LONG":
         end_kind, start_kind = "HIGH", "LOW"
@@ -256,22 +294,42 @@ def _build_leg_from_break(
         end_kind, start_kind = "LOW", "HIGH"
         preferred_start_label = "LH"
 
-    if min_idx >= 0:
+    after_end_idx = max(min_end_idx, -1)
+
+    # 1) Сначала ищем подтверждённый ``end`` ВНУТРИ текущего сегмента (между
+    #    предыдущим break того же направления и ``broken_idx``) — это покрывает
+    #    кейсы CHOCH/первого BOS, где LL/HH уже сформирован до пробоя.
+    end_pivot = _last_pivot_before_breaking_threshold(
+        pivots,
+        before_idx=br.broken_idx,
+        min_idx=min_idx,
+        kind=end_kind,
+        direction=br.direction,
+        threshold_price=br.swing_price,
+        after_idx=after_end_idx,
+    )
+    # 2) Если в сегменте нет ничего глубже свинга — берём НОВЫЙ pivot ПОСЛЕ
+    #    ``broken_idx`` (continuation BOS, где new LL/HH формируется уже после
+    #    самого пробоя и подтверждается с задержкой ``swing_size``). Окно
+    #    ограничено сверху следующим break того же направления, иначе мы бы
+    #    «забирали» pivot, принадлежащий уже следующей ноге.
+    if end_pivot is None:
         end_pivot = _first_pivot_after_breaking_threshold(
             pivots,
-            after_idx=br.broken_idx,
+            after_idx=max(br.broken_idx, after_end_idx),
             kind=end_kind,
             direction=br.direction,
             threshold_price=br.swing_price,
+            before_idx=next_same_dir_break_idx,
         )
-        if end_pivot is None:
-            end_pivot = _last_pivot_before(
-                pivots, before_idx=br.broken_idx, min_idx=min_idx, kind=end_kind
-            )
-    else:
+    # 3) Fallback на ``swing pivot`` (когда ни до, ни после нет более глубокого
+    #    экстремума — например, флэт после break без явного нового пика).
+    if end_pivot is None:
         end_pivot = _last_pivot_before(
             pivots, before_idx=br.broken_idx, min_idx=min_idx, kind=end_kind
         )
+        if end_pivot is not None and after_end_idx >= 0 and end_pivot.idx <= after_end_idx:
+            end_pivot = None
     if end_pivot is None:
         return None
 
@@ -346,14 +404,34 @@ def extract_impulse_legs_confirmed(
     confirmed: list[ImpulseLeg] = []
     active_by_dir: dict[str, ImpulseLeg | None] = {"LONG": None, "SHORT": None}
     last_anchor_idx_by_dir: dict[str, int] = {"LONG": -1, "SHORT": -1}
+    last_end_idx_by_dir: dict[str, int] = {"LONG": -1, "SHORT": -1}
     seen: set[tuple[int, int, str, int]] = set()
 
-    for br in sorted_breaks:
+    # Граница «после-broken_idx» поиска: swing_idx следующего одноимённого
+    # break — этот pivot принадлежит уже следующей ноге, заходить за него
+    # нельзя, иначе ноги двух соседних BOS получат одинаковый end.
+    next_same_dir_swing_idx_by_pos: list[int | None] = [None] * len(sorted_breaks)
+    for i, br in enumerate(sorted_breaks):
+        if br.kind not in ("BOS", "CHOCH"):
+            continue
+        for j in range(i + 1, len(sorted_breaks)):
+            nxt = sorted_breaks[j]
+            if nxt.kind in ("BOS", "CHOCH") and nxt.direction == br.direction:
+                next_same_dir_swing_idx_by_pos[i] = nxt.swing_idx
+                break
+
+    for i, br in enumerate(sorted_breaks):
         if br.kind not in ("BOS", "CHOCH"):
             continue
 
         min_idx = last_anchor_idx_by_dir.get(br.direction, -1)
-        leg = _build_leg_from_break(pivots, br, min_idx=min_idx)
+        leg = _build_leg_from_break(
+            pivots,
+            br,
+            min_idx=min_idx,
+            next_same_dir_break_idx=next_same_dir_swing_idx_by_pos[i],
+            min_end_idx=last_end_idx_by_dir.get(br.direction, -1),
+        )
         if leg is None:
             continue
 
@@ -380,6 +458,7 @@ def extract_impulse_legs_confirmed(
         confirmed.append(leg)
         active_by_dir[br.direction] = leg
         last_anchor_idx_by_dir[br.direction] = br.broken_idx
+        last_end_idx_by_dir[br.direction] = leg.end_idx
 
     return confirmed
 
@@ -468,6 +547,13 @@ def extract_structure_breaks(
     high_active = False
     low_active = False
     prev_break_dir = 0  # 1=last break was UP, -1=DOWN, 0=none yet
+    # «Замороженные» уровни последних пробоев внутри ТЕКУЩЕЙ серии направления:
+    # в том же направлении новый swing должен СТРОГО превзойти пробитый уровень,
+    # иначе плоские повторные пивоты на той же отметке дадут дубликат break.
+    # При смене серии (противоположный break) ограничение на эту сторону
+    # ослабляем: иначе CHOCH по LH/HL (ниже/выше прошлого экстремума) потеряется.
+    last_broken_high: float | None = None
+    last_broken_low: float | None = None
 
     breaks: list[StructureBreak] = []
     for i in range(n):
@@ -476,23 +562,33 @@ def extract_structure_breaks(
             window_hi = highs[cand - swing_size : cand + swing_size + 1]
             if math.isfinite(float(highs[cand])) and float(highs[cand]) == window_hi.max():
                 price = float(highs[cand])
-                prev_high_label = (
-                    "HH" if (last_high_pivot is None or price >= last_high_pivot) else "LH"
-                )
-                last_high_pivot = price
-                prev_high = price
-                prev_high_idx = cand
-                high_active = True
+                if (
+                    last_broken_high is None
+                    or prev_break_dir != 1
+                    or price > last_broken_high
+                ):
+                    prev_high_label = (
+                        "HH" if (last_high_pivot is None or price >= last_high_pivot) else "LH"
+                    )
+                    last_high_pivot = price
+                    prev_high = price
+                    prev_high_idx = cand
+                    high_active = True
             window_lo = lows[cand - swing_size : cand + swing_size + 1]
             if math.isfinite(float(lows[cand])) and float(lows[cand]) == window_lo.min():
                 price = float(lows[cand])
-                prev_low_label = (
-                    "HL" if (last_low_pivot is None or price >= last_low_pivot) else "LL"
-                )
-                last_low_pivot = price
-                prev_low = price
-                prev_low_idx = cand
-                low_active = True
+                if (
+                    last_broken_low is None
+                    or prev_break_dir != -1
+                    or price < last_broken_low
+                ):
+                    prev_low_label = (
+                        "HL" if (last_low_pivot is None or price >= last_low_pivot) else "LL"
+                    )
+                    last_low_pivot = price
+                    prev_low = price
+                    prev_low_idx = cand
+                    low_active = True
 
         if high_active and prev_high is not None and float(src_hi[i]) > prev_high:
             kind = "CHOCH" if prev_break_dir == -1 else "BOS"
@@ -507,6 +603,7 @@ def extract_structure_breaks(
                     broken_idx=i,
                 )
             )
+            last_broken_high = prev_high
             high_active = False
             prev_break_dir = 1
         if low_active and prev_low is not None and float(src_lo[i]) < prev_low:
@@ -522,6 +619,7 @@ def extract_structure_breaks(
                     broken_idx=i,
                 )
             )
+            last_broken_low = prev_low
             low_active = False
             prev_break_dir = -1
 
@@ -1232,7 +1330,11 @@ def filter_causal_structure_breaks(
         if not candidate:
             return []
 
-    visible_cache: dict[int, set[tuple[int, int, str, str]]] = {}
+    # Сравниваем без поля ``kind``: повторный пересчёт impulse-lock на полном
+    # хвосте может перевешивать BOS↔CHOCH (через ``reclassify_structure_break_kinds``),
+    # но сам факт пробоя — момент закрытия свечи — был виден в реальном времени.
+    # Иначе causal-filter на полностью валидном break теряет его из-за смены kind.
+    visible_cache: dict[int, set[tuple[int, int, str]]] = {}
     out: list[StructureBreak] = []
     for br in candidate:
         broken_idx = int(br.broken_idx)
@@ -1248,11 +1350,11 @@ def filter_causal_structure_breaks(
                 impulse_lock=impulse_lock,
             )
             visible = {
-                (int(b.broken_idx), int(b.swing_idx), b.direction, b.kind)
+                (int(b.broken_idx), int(b.swing_idx), b.direction)
                 for b in prefix_breaks
             }
             visible_cache[broken_idx] = visible
-        key = (int(br.broken_idx), int(br.swing_idx), br.direction, br.kind)
+        key = (int(br.broken_idx), int(br.swing_idx), br.direction)
         if key in visible:
             out.append(br)
     return out

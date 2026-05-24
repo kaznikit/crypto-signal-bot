@@ -226,7 +226,16 @@ def _emit_fresh_pivot_events(
         )
 
     for leg in impulse_legs:
-        if leg.anchor_break_idx != last_pos:
+        if leg.anchor_break_idx is None:
+            continue
+        # IMPULSE появляется на чарте, когда нога первый раз становится
+        # buildable — для этого должны быть подтверждены и BOS/CHoCH (broken_idx),
+        # и end-pivot (end_idx + swing_size, чтобы он стал валидным pivot'ом).
+        # Если end формируется уже после пробоя (continuation BOS), эмиссия
+        # уезжает на бар подтверждения нового пика, иначе IMPULSE никогда не
+        # попадёт на overlay.
+        confirm_bar = max(leg.anchor_break_idx, leg.end_idx + swing_size)
+        if confirm_bar != last_pos:
             continue
         events_out.append(
             {

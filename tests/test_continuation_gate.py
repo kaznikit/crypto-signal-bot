@@ -552,6 +552,82 @@ def test_prepare_short_on_second_bos_after_choch_prepare() -> None:
     assert abs(last["trigger"] - 92.0) < 1.0
 
 
+def test_prepare_long_on_second_bos_with_pivot_after_break() -> None:
+    """Continuation BOS LONG с новым HH ПОСЛЕ broken_idx: leg строится на новый
+    локальный HL→HH, и PREPARE срабатывает при первом касании 0.5 этой ноги.
+
+    Сценарий из реального кейса (chart 2): после первого BOS LONG цена откатывается
+    до нового HL и идёт ещё выше (новый HH ПОСЛЕ второго broken_idx). 0.5
+    «новой» ноги не совпадает с 0.5 «старой» — раньше это давало leg на старых
+    HL/HH и PREPARE не срабатывал на корректном уровне.
+    """
+    pattern: list[float] = []
+    pattern += [100.0] * 5
+    pattern += [98.0, 96.0, 94.0, 92.0, 90.0]
+    pattern += [90.0] * 4
+    pattern += [92.0, 95.0, 98.0, 102.0, 106.0, 110.0, 114.0, 118.0]
+    pattern += [118.0] * 4
+    pattern += [115.0, 112.0, 109.0, 106.0, 103.0, 100.0]
+    pattern += [100.0] * 4
+    pattern += [103.0, 106.0, 110.0, 115.0, 120.0, 125.0, 130.0]
+    pattern += [130.0] * 4
+    pattern += [127.0, 124.0, 121.0, 118.0, 115.0, 112.0]
+    pattern += [112.0] * 4
+    bars: list[dict[str, float | int]] = []
+    for i, c in enumerate(pattern):
+        bars.append(
+            {
+                "open_time": i * 60_000,
+                "open": float(c) - 0.05,
+                "high": float(c) + 0.3,
+                "low": float(c) - 0.3,
+                "close": float(c),
+                "volume": 100.0,
+            }
+        )
+    df = pd.DataFrame(bars)
+    state = ContinuationPrepareState()
+    long_prepares: list[dict[str, float | int]] = []
+    for end in range(len(df)):
+        setup, event = detect_continuation_prepare(
+            symbol="TEST",
+            htf="1H",
+            htf_df=df.iloc[: end + 1],
+            close_time=int(df.iloc[end]["open_time"]),
+            swing_size=3,
+            fib_level=0.5,
+            impulse_max_age_bars=len(df),
+            structure_max_bars_ago=len(df),
+            prepare_state=state,
+        )
+        if setup is not None and setup.direction == "LONG" and event is not None:
+            long_prepares.append(
+                {
+                    "bar": end,
+                    "broken_idx": int(event.payload["structure_broken_open_ms"]) // 60_000,
+                    "start_idx": int(event.payload["impulse_leg_start_open_ms"]) // 60_000,
+                    "end_idx": int(event.payload["impulse_leg_end_open_ms"]) // 60_000,
+                    "trigger": float(event.payload["prepare_trigger_level"]),
+                }
+            )
+    second_prepare = next(
+        (p for p in long_prepares if int(p["broken_idx"]) == 40), None
+    )
+    assert second_prepare is not None, (
+        "PREPARE LONG для continuation BOS@40 должен срабатывать на касании 0.5"
+        f" второй ноги; получено: {long_prepares}"
+    )
+    assert int(second_prepare["start_idx"]) >= 30, (
+        "вторая нога должна стартовать на новом локальном HL, не на старом 13"
+    )
+    assert int(second_prepare["end_idx"]) > 40, (
+        "новый HH должен быть ПОСЛЕ broken_idx=40 (continuation)"
+    )
+    assert abs(float(second_prepare["trigger"]) - 115.0) < 2.0, (
+        "0.5 второй ноги ≈ 115 (между HL≈100 и HH≈130)"
+    )
+
+
 def test_multiple_long_prepares_allowed_for_distinct_legs() -> None:
     """Break-driven PREPARE LONG на валидированной синтетике (если BOS+0.5 совпали)."""
     bars: list[dict[str, float | int]] = []

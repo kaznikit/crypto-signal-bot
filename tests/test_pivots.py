@@ -601,3 +601,25 @@ def test_opposite_structure_break_since_open_ms_filters_by_direction_and_time() 
         breaks, df, setup_direction="LONG", since_open_ms=int(df.iloc[13]["open_time"])
     )
     assert none_after is None
+
+
+def test_extract_structure_breaks_does_not_repeat_break_at_same_level() -> None:
+    """После пробоя уровня P повторный pivot на той же высоте/глубине не
+    должен генерировать новый break того же направления — линию пробивают
+    только один раз. Только новый pivot СТРОГО глубже / выше последнего
+    пробитого может быть свинговым для следующего пробоя."""
+    pattern: list[float] = []
+    pattern += [100.0] * 6
+    pattern += [98.0, 95.0, 92.0]
+    pattern += [89.0]
+    pattern += [92.0, 95.0, 98.0, 100.0, 100.0, 100.0, 100.0, 100.0]
+    pattern += [97.0, 94.0, 91.0]
+    pattern += [88.0]
+    df = _df(pattern)
+    breaks = extract_structure_breaks(df, swing_size=3, use_close=True)
+    short_break_levels = [b.swing_price for b in breaks if b.direction == "SHORT"]
+    assert short_break_levels, "ожидается хотя бы один SHORT-пробой"
+    assert all(level < 100.0 - 1e-9 for level in short_break_levels[1:]), (
+        "повторный пробой уровня 100 не должен фиксироваться: "
+        f"breaks={short_break_levels}"
+    )
