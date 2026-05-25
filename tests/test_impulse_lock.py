@@ -612,8 +612,88 @@ def test_extract_structure_breaks_htf_collapsed_flip_keeps_probe_swing(monkeypat
     assert flip.swing_price == 99.0
 
 
+def test_short_choch_after_long_bos_anchors_on_structural_hh() -> None:
+    """SHORT-импульс после LONG BOS стартует от структурного HH (пика LONG-тренда),
+    а не от ближайшего корректирующего LH.
+
+    Воспроизводит INJUSDT 1H 19-21.05.26: после LONG BOS (anchor=22) HH 5.434
+    зафиксирован как пик LONG-импульса. Затем серия HL/LH ниже структурного
+    пика, и наконец CHOCH SHORT по HL. Импульсная нога должна анкорить start
+    на HH 5.434 (структурный пик), а не на последнем LH перед LL.
+    """
+    swing = 4
+    pivots = [
+        Pivot(idx=14, kind="LOW", price=4.503, label="HL"),
+        Pivot(idx=15, kind="HIGH", price=4.718, label="HH"),
+        Pivot(idx=28, kind="HIGH", price=5.434, label="HH"),  # структурный пик
+        Pivot(idx=41, kind="LOW", price=4.825, label="HL"),
+        Pivot(idx=43, kind="HIGH", price=5.090, label="LH"),
+        Pivot(idx=52, kind="LOW", price=4.877, label="HL"),
+        Pivot(idx=57, kind="HIGH", price=5.097, label="HH"),
+        Pivot(idx=59, kind="LOW", price=4.907, label="HL"),
+        Pivot(idx=66, kind="HIGH", price=5.265, label="HH"),
+        Pivot(idx=74, kind="LOW", price=4.745, label="LL"),  # LL после CHOCH
+    ]
+    breaks = [
+        StructureBreak("LONG", "BOS", swing_idx=15, swing_price=4.718, broken_idx=22),
+        StructureBreak("SHORT", "CHOCH", swing_idx=59, swing_price=4.907, broken_idx=73),
+    ]
+    legs = extract_impulse_legs_confirmed(pivots, breaks, swing_size=swing)
+    shorts = [leg for leg in legs if leg.direction == "SHORT"]
+    assert shorts, "ожидаем SHORT-ногу от CHOCH"
+    short_leg = shorts[-1]
+    assert short_leg.start_idx == 28, (
+        f"SHORT start должен быть структурным HH (idx 28), а не ближайшим LH; "
+        f"got {short_leg.start_idx}"
+    )
+    assert short_leg.start_price == 5.434
+    assert short_leg.end_idx == 74
+    assert short_leg.end_price == 4.745
+    assert short_leg.anchor_break_idx == 73
+
+
+def test_long_choch_after_short_bos_anchors_on_structural_ll() -> None:
+    """Зеркальный кейс: LONG-импульс после SHORT BOS стартует от структурного LL.
+
+    Симметрично INJUSDT: после SHORT BOS дно SHORT-импульса (структурный LL)
+    задаёт start нового LONG-импульса, а не ближайший корректирующий HL.
+    """
+    swing = 4
+    pivots = [
+        Pivot(idx=10, kind="HIGH", price=5.0, label="HH"),
+        Pivot(idx=20, kind="LOW", price=4.0, label="LL"),    # структурное дно
+        Pivot(idx=30, kind="HIGH", price=4.4, label="LH"),
+        Pivot(idx=40, kind="LOW", price=4.2, label="HL"),
+        Pivot(idx=50, kind="HIGH", price=4.5, label="HH"),
+        Pivot(idx=60, kind="LOW", price=4.3, label="HL"),
+        Pivot(idx=70, kind="HIGH", price=4.8, label="HH"),   # HH после CHOCH
+    ]
+    breaks = [
+        StructureBreak("SHORT", "BOS", swing_idx=5, swing_price=5.0, broken_idx=15),
+        StructureBreak("LONG", "CHOCH", swing_idx=50, swing_price=4.5, broken_idx=65),
+    ]
+    legs = extract_impulse_legs_confirmed(pivots, breaks, swing_size=swing)
+    longs = [leg for leg in legs if leg.direction == "LONG"]
+    assert longs, "ожидаем LONG-ногу от CHOCH"
+    long_leg = longs[-1]
+    assert long_leg.start_idx == 20, (
+        f"LONG start должен быть структурным LL (idx 20), а не ближайшим HL; "
+        f"got {long_leg.start_idx}"
+    )
+    assert long_leg.start_price == 4.0
+    assert long_leg.end_idx == 70
+    assert long_leg.end_price == 4.8
+
+
 def test_confirmed_short_leg_after_choch_uses_recent_segment_low() -> None:
-    """После CHOCH SHORT нога должна строиться на свежем LL после swing, не на старом low."""
+    """После CHOCH SHORT нога заканчивается на свежем LL и стартует от структурного пика.
+
+    End (LL) — это новый LL ПОСЛЕ swing (idx 766 < swing_price=4.936),
+    не старый swing-low (idx 758). Start (структурный) — самый высокий
+    HIGH-пивот между предыдущим LONG break (idx 703) и end-LL: idx 744 LH 5.325
+    (см. также INJUSDT 1H 19-21.05.26: красная диагональ SHORT идёт от пика
+    LONG-тренда, а не от ближайшего LH).
+    """
     swing = 4
     pivots = [
         Pivot(idx=730, kind="LOW", price=4.906, label="HL"),
@@ -634,7 +714,7 @@ def test_confirmed_short_leg_after_choch_uses_recent_segment_low() -> None:
     shorts = [leg for leg in legs if leg.direction == "SHORT"]
     assert shorts
     last = shorts[-1]
-    assert last.start_idx == 763
+    assert last.start_idx == 744
     assert last.end_idx == 766
     assert last.anchor_break_idx == 765
 

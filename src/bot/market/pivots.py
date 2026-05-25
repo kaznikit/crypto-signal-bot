@@ -267,6 +267,45 @@ def _last_pivot_before_breaking_threshold(
     return None
 
 
+def _structural_start_pivot(
+    pivots: list[Pivot],
+    *,
+    direction: str,
+    before_idx: int,
+    after_idx: int,
+) -> Pivot | None:
+    """Структурный start импульса в окне ``(after_idx, before_idx)``.
+
+    Для SHORT — HIGH-пивот с МАКСИМАЛЬНОЙ ценой (структурный «потолок» движения).
+    Для LONG  — LOW-пивот  с МИНИМАЛЬНОЙ ценой (структурное «дно» движения).
+
+    Это согласует анкоры IMPULSE-ноги с тем, что трейдер визуально видит на
+    графике: красная диагональ SHORT-импульса должна идти от пика (HH), а не
+    от ближайшего LH; зелёная LONG-диагональ — от настоящего LL/HL дна, а не
+    от последнего верхнего HL.
+
+    При равенстве цены выбирается БОЛЕЕ РАННИЙ pivot — это исток движения, а
+    не последнее повторное касание уровня.
+    """
+    if direction == "SHORT":
+        candidates = [
+            p
+            for p in pivots
+            if p.kind == "HIGH" and after_idx < p.idx < before_idx
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: (p.price, -p.idx))
+    candidates = [
+        p
+        for p in pivots
+        if p.kind == "LOW" and after_idx < p.idx < before_idx
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda p: (p.price, p.idx))
+
+
 def _build_leg_from_break(
     pivots: list[Pivot],
     br: StructureBreak,
@@ -274,6 +313,7 @@ def _build_leg_from_break(
     min_idx: int = -1,
     next_same_dir_break_idx: int | None = None,
     min_end_idx: int = -1,
+    previous_opposite_broken_idx: int = -1,
 ) -> ImpulseLeg | None:
     """Собрать импульсную ногу от BOS/CHoCH.
 
@@ -283,9 +323,14 @@ def _build_leg_from_break(
     не строится — fallback'ом служит сам ``swing pivot`` (последний экстремум
     до пробоя в том же направлении сегмента).
 
-    Start ищется как последний коррекционный pivot до ``end_pivot.idx``: для
-    LONG — HL, для SHORT — LH. Если ``min_idx >= 0`` (continuation), поиск
-    ограничен текущим трендовым сегментом и fallback на старые HH/LL отключён.
+    Start — **структурный** экстремум-исток движения:
+    * SHORT: самый высокий HIGH-пивот в (last_opposite_broken_idx, end.idx) —
+      то есть пик последнего LONG-тренда, от которого медведи начали движение.
+    * LONG: самый низкий LOW-пивот в (last_opposite_broken_idx, end.idx) — дно
+      последнего SHORT-тренда, от которого быки начали движение.
+
+    Если в этом окне ничего нет, fallback'ом служит последний коррекционный
+    HL/LH в трендовом сегменте.
     """
     if br.direction == "LONG":
         end_kind, start_kind = "HIGH", "LOW"
@@ -296,8 +341,16 @@ def _build_leg_from_break(
 
     # End ноги (HH/LL) не может быть старее свинга, который пробивается этим break.
     # Иначе при CHOCH/BOS возможно «прилипание» к старому экстремуму из предыдущего
-    # сегмента и потеря актуальной ноги (например, SHORT после свежего CHOCH).
-    if br.kind == "CHOCH":
+    # сегмента и потеря актуальной ноги (например, BOS LONG ловит HH из давно
+    # завершённого LONG-тренда, который выше пробитого LH-свинга, но семантически
+    # принадлежит прошлой ноге — см. INJUSDT 1H 18-19.05.26).
+    # Применяем ограничение только когда swing соответствует семантике направления
+    # (LONG ⇒ HIGH, SHORT ⇒ LOW). Иначе синтетические тесты с «несвязанным»
+    # swing-kind ломаются.
+    swing_kind_matches_dir = any(
+        p.idx == br.swing_idx and p.kind == end_kind for p in pivots
+    )
+    if br.kind == "CHOCH" or swing_kind_matches_dir:
         after_end_idx = max(min_end_idx, br.swing_idx - 1)
     else:
         after_end_idx = max(min_end_idx, -1)
@@ -339,13 +392,31 @@ def _build_leg_from_break(
     if end_pivot is None:
         return None
 
-    start_pivot = _last_pivot_before(
-        pivots,
-        before_idx=end_pivot.idx,
-        min_idx=min_idx,
-        kind=start_kind,
-        label=preferred_start_label,
-    )
+    # Структурный start (CHOCH = разворот тренда): самый «крайний» pivot в
+    # сегменте от последнего противоположного break до end_pivot.idx. Красная
+    # диагональ SHORT идёт от пика (HH), не от последнего корректирующего LH
+    # (см. INJUSDT 1H 19.05-21.05.26 в баг-репорте). Для BOS (continuation в
+    # том же тренде) логика прежняя — последний LOCAL HL/LH из сегмента, иначе
+    # каждая нога в трендовом канале анкорилась бы на одно и то же дно/пик.
+    # Без подтверждённого предыдущего противоположного break (флипа сегмента)
+    # «структурный» extreme может оказаться из давно неактуального прошлого —
+    # тогда тоже падаем на local pivot.
+    start_pivot: Pivot | None = None
+    if br.kind == "CHOCH" and previous_opposite_broken_idx >= 0:
+        start_pivot = _structural_start_pivot(
+            pivots,
+            direction=br.direction,
+            before_idx=end_pivot.idx,
+            after_idx=previous_opposite_broken_idx,
+        )
+    if start_pivot is None:
+        start_pivot = _last_pivot_before(
+            pivots,
+            before_idx=end_pivot.idx,
+            min_idx=min_idx,
+            kind=start_kind,
+            label=preferred_start_label,
+        )
     if start_pivot is None and min_idx < 0:
         start_pivot = _last_pivot_before(
             pivots, before_idx=end_pivot.idx, min_idx=min_idx, kind=start_kind
@@ -411,6 +482,7 @@ def extract_impulse_legs_confirmed(
     active_by_dir: dict[str, ImpulseLeg | None] = {"LONG": None, "SHORT": None}
     last_anchor_idx_by_dir: dict[str, int] = {"LONG": -1, "SHORT": -1}
     last_end_idx_by_dir: dict[str, int] = {"LONG": -1, "SHORT": -1}
+    last_broken_idx_by_dir: dict[str, int] = {"LONG": -1, "SHORT": -1}
     seen: set[tuple[int, int, str, int]] = set()
 
     # Граница «после-broken_idx» поиска: swing_idx следующего одноимённого
@@ -430,6 +502,7 @@ def extract_impulse_legs_confirmed(
         if br.kind not in ("BOS", "CHOCH"):
             continue
 
+        opposite = "SHORT" if br.direction == "LONG" else "LONG"
         min_idx = last_anchor_idx_by_dir.get(br.direction, -1)
         leg = _build_leg_from_break(
             pivots,
@@ -437,6 +510,7 @@ def extract_impulse_legs_confirmed(
             min_idx=min_idx,
             next_same_dir_break_idx=next_same_dir_swing_idx_by_pos[i],
             min_end_idx=last_end_idx_by_dir.get(br.direction, -1),
+            previous_opposite_broken_idx=last_broken_idx_by_dir.get(opposite, -1),
         )
         if leg is None:
             continue
@@ -465,6 +539,7 @@ def extract_impulse_legs_confirmed(
         active_by_dir[br.direction] = leg
         last_anchor_idx_by_dir[br.direction] = br.broken_idx
         last_end_idx_by_dir[br.direction] = leg.end_idx
+        last_broken_idx_by_dir[br.direction] = br.broken_idx
 
     return confirmed
 
@@ -1301,15 +1376,25 @@ def detect_pivots_htf(
     use_close: bool = True,
     impulse_lock: bool = True,
 ) -> list[Pivot]:
-    """Пивоты с опциональным HTF impulse-lock (ретрейс без внутреннего шума)."""
+    """Пивоты с опциональным HTF impulse-lock (ретрейс без внутреннего шума).
+
+    ``legs`` для anchors берём из ВИДИМЫХ breaks (включая synthetic CHOCH при
+    инвалидации импульса) — иначе HH/LL-конец ноги, подтверждённой пробитием
+    стартового HL/LH, теряется на overlay'е. Для самого ``state`` (lock-фаза)
+    используем raw_breaks, чтобы synthetic CHOCH не зацикливался (он строится
+    ИЗ state).
+    """
     pivots = detect_pivots(df, swing_size=swing_size)
     if not impulse_lock:
         return pivots
     breaks_raw = extract_structure_breaks(
         df, swing_size=swing_size, use_close=use_close
     )
+    visible_breaks = extract_structure_breaks_htf(
+        df, swing_size=swing_size, use_close=use_close, impulse_lock=True
+    )
     legs = extract_impulse_legs_confirmed(
-        pivots, breaks_raw, swing_size=swing_size, df=df
+        pivots, visible_breaks, swing_size=swing_size, df=df
     )
     state = compute_impulse_lock_state(
         df,
