@@ -573,13 +573,25 @@ def extract_structure_breaks(
                     or prev_break_dir != 1
                     or price > last_broken_high
                 ):
-                    prev_high_label = (
-                        "HH" if (last_high_pivot is None or price >= last_high_pivot) else "LH"
+                    # В LONG-тренде активный (ещё непробитый) prev_high — это
+                    # структурный HH, и его нельзя «переписывать» более низким
+                    # внутренним HIGH-пивотом. Иначе BOS LONG срабатывает на
+                    # промежуточном уровне, до того как цена реально пробьёт
+                    # структурный максимум. Симметрично — для prev_low в SHORT.
+                    same_dir_locked_high = (
+                        prev_break_dir == 1
+                        and high_active
+                        and prev_high is not None
+                        and price < prev_high
                     )
-                    last_high_pivot = price
-                    prev_high = price
-                    prev_high_idx = cand
-                    high_active = True
+                    if not same_dir_locked_high:
+                        prev_high_label = (
+                            "HH" if (last_high_pivot is None or price >= last_high_pivot) else "LH"
+                        )
+                        last_high_pivot = price
+                        prev_high = price
+                        prev_high_idx = cand
+                        high_active = True
             window_lo = lows[cand - swing_size : cand + swing_size + 1]
             if math.isfinite(float(lows[cand])) and float(lows[cand]) == window_lo.min():
                 price = float(lows[cand])
@@ -588,13 +600,20 @@ def extract_structure_breaks(
                     or prev_break_dir != -1
                     or price < last_broken_low
                 ):
-                    prev_low_label = (
-                        "HL" if (last_low_pivot is None or price >= last_low_pivot) else "LL"
+                    same_dir_locked_low = (
+                        prev_break_dir == -1
+                        and low_active
+                        and prev_low is not None
+                        and price > prev_low
                     )
-                    last_low_pivot = price
-                    prev_low = price
-                    prev_low_idx = cand
-                    low_active = True
+                    if not same_dir_locked_low:
+                        prev_low_label = (
+                            "HL" if (last_low_pivot is None or price >= last_low_pivot) else "LL"
+                        )
+                        last_low_pivot = price
+                        prev_low = price
+                        prev_low_idx = cand
+                        low_active = True
 
         if high_active and prev_high is not None and float(src_hi[i]) > prev_high:
             kind = "CHOCH" if prev_break_dir == -1 else "BOS"

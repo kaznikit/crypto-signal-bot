@@ -550,9 +550,14 @@ def _keep_single_retrace_pivot_per_leg(
 
     Это устраняет ложные LH/HL без нового BOS/CHOCH и синхронизирует overlay с
     ожиданием «одна коррекционная метка между структурными событиями».
+
+    Дополнительно сохраняются якоря подтверждённых IMPULSE-ног (start/end) —
+    HH/LL на конце импульса всегда должен быть виден на overlay, даже если
+    структурно он не служит swing-ом ни для какого BOS/CHOCH.
     """
     piv_by_tf: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     struct_by_tf: dict[str, list[dict[str, Any]]] = {}
+    impulse_anchor_by_tf: dict[str, set[int]] = {}
     for i, ev in enumerate(events):
         kind = str(ev.get("kind") or "")
         tf = str(ev.get("htf") or "")
@@ -562,6 +567,14 @@ def _keep_single_retrace_pivot_per_leg(
             piv_by_tf.setdefault(tf, []).append((i, ev))
         elif kind == "STRUCTURE":
             struct_by_tf.setdefault(tf, []).append(ev)
+        elif kind == "IMPULSE":
+            anchors = impulse_anchor_by_tf.setdefault(tf, set())
+            start_ms = int(ev.get("start_open_ms") or 0)
+            end_ms = int(ev.get("end_open_ms") or 0)
+            if start_ms > 0:
+                anchors.add(start_ms)
+            if end_ms > 0:
+                anchors.add(end_ms)
 
     keep_pivot_idx: set[int] = set()
     for tf, pivots in piv_by_tf.items():
@@ -574,6 +587,7 @@ def _keep_single_retrace_pivot_per_leg(
             for e in structures
             if int(e.get("swing_open_ms") or 0) > 0
         }
+        anchor_pivot_ms |= impulse_anchor_by_tf.get(tf, set())
         if not structures:
             keep_pivot_idx.update(i for i, _ in pivots)
             continue

@@ -640,7 +640,18 @@ def test_confirmed_short_leg_after_choch_uses_recent_segment_low() -> None:
 
 
 def test_break_of_hl_is_choch_even_before_lock_confirmed() -> None:
-    """Ранний flip-пробой до подтверждения новой ноги не должен закрепляться как CHOCH."""
+    """Внутренний пробой HL не пробивает структурный LL — break не эмитится.
+
+    Бывший контракт «ранний flip-пробой обязательно даёт BOS» отражал старое
+    Pine-Leviathan поведение, где prev_low в SHORT-тренде переписывался любым
+    новым LOW-пивотом (в том числе более ВЫСОКИМ). Это давало BOS на пробое
+    промежуточного HL без касания структурного LL.
+
+    Новый контракт: prev_low в SHORT-тренде «залочен» на наименьшем
+    непробитом LL, и пробой более высокого внутреннего HL событием не
+    становится. Симметрично для LONG-тренда и prev_high (см. сценарий
+    INJUSDT 1H 19-21.05.26 в баг-репорте пользователя).
+    """
     closes = [
         100.13255711869463,
         99.89575188177145,
@@ -710,9 +721,12 @@ def test_break_of_hl_is_choch_even_before_lock_confirmed() -> None:
     breaks = extract_structure_breaks_htf(
         on_break, swing_size=swing, use_close=True, impulse_lock=True
     )
-    short_breaks = [b for b in breaks if b.direction == "SHORT" and b.broken_idx == 47]
-    assert short_breaks
-    assert short_breaks[-1].kind == "BOS"
+    # Пробой HL 84.07 без пробития структурного LL 82.95 не должен порождать
+    # SHORT-событие. Если в будущем close уйдёт ниже 82.95 — там и появится BOS.
+    short_breaks_at_47 = [b for b in breaks if b.direction == "SHORT" and b.broken_idx == 47]
+    assert not short_breaks_at_47
+    # А прежний (валидный) SHORT-пробой структурного HL≈99.61 на ходе вниз — на месте.
+    assert any(b.direction == "SHORT" and abs(b.swing_price - 99.613) < 0.01 for b in breaks)
 
 
 def test_pivot_label_relabels_false_ll_above_hl() -> None:
