@@ -477,3 +477,62 @@ def test_keep_single_retrace_pivot_preserves_structure_anchor_pivot() -> None:
     _keep_single_retrace_pivot_per_leg(events)
     pivots = [e for e in events if e.get("kind") == "PIVOT"]
     assert any(int(p["bar_open_ms"]) == 2 for p in pivots)
+
+
+def test_keep_single_retrace_pivot_before_first_structure_keeps_first_hl() -> None:
+    events = [
+        {
+            "kind": "PIVOT",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "bar_open_ms": 1000,
+            "label": "HL",
+            "pivot_kind": "LOW",
+            "price": 4.8,
+        },
+        {
+            "kind": "PIVOT",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "bar_open_ms": 2000,
+            "label": "HH",
+            "pivot_kind": "HIGH",
+            "price": 5.1,
+        },
+        {
+            "kind": "PIVOT",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "bar_open_ms": 3000,
+            "label": "HL",
+            "pivot_kind": "LOW",
+            "price": 4.9,
+        },
+        {
+            "kind": "STRUCTURE",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "bar_open_ms": 4000,
+            "subkind": "CHOCH",
+            "direction": "SHORT",
+            "level": 4.9,
+            "swing_open_ms": 3000,
+        },
+    ]
+    _keep_single_retrace_pivot_per_leg(events)
+    pivots = [e for e in events if e.get("kind") == "PIVOT"]
+    assert any(int(p["bar_open_ms"]) == 1000 for p in pivots)
+    assert not any(int(p["bar_open_ms"]) == 3000 for p in pivots)
+
+
+def test_keep_single_retrace_anchor_drops_duplicate_hl_in_same_segment() -> None:
+    events = [
+        {"kind": "STRUCTURE", "symbol": "INJUSDT", "htf": "1H", "bar_open_ms": 1000, "subkind": "BOS", "direction": "LONG", "level": 10.0, "swing_open_ms": 900},
+        {"kind": "PIVOT", "symbol": "INJUSDT", "htf": "1H", "bar_open_ms": 2000, "label": "HL", "pivot_kind": "LOW", "price": 9.0},
+        {"kind": "PIVOT", "symbol": "INJUSDT", "htf": "1H", "bar_open_ms": 3000, "label": "HL", "pivot_kind": "LOW", "price": 9.2},
+        {"kind": "STRUCTURE", "symbol": "INJUSDT", "htf": "1H", "bar_open_ms": 4000, "subkind": "CHOCH", "direction": "SHORT", "level": 9.2, "swing_open_ms": 3000},
+    ]
+    _keep_single_retrace_pivot_per_leg(events)
+    piv_ms = [int(e["bar_open_ms"]) for e in events if e.get("kind") == "PIVOT"]
+    assert 2000 in piv_ms
+    assert 3000 not in piv_ms

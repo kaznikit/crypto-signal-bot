@@ -245,34 +245,35 @@ def _emit_fresh_pivot_events(
             continue
         swing_idx = br.swing_idx
         swing_price = float(br.swing_price)
-        # Для overlay переякориваем CHOCH/BOS к структурному HL/LH сегмента
-        # (между последним opposite break и текущим break), чтобы линия
-        # STRUCTURE визуально шла от ожидаемой опорной точки.
-        last_opposite_broken = -1
-        for prev in reversed(visible_breaks[:br_pos]):
-            if prev.direction != br.direction:
-                last_opposite_broken = prev.broken_idx
-                break
-        if br.direction == "SHORT":
-            lows = [
-                p
-                for p in raw_pivots
-                if p.kind == "LOW" and last_opposite_broken < p.idx < br.broken_idx
-            ]
-            if lows:
-                best = min(lows, key=lambda p: (p.price, p.idx))
-                swing_idx = best.idx
-                swing_price = float(best.price)
-        else:
-            highs = [
-                p
-                for p in raw_pivots
-                if p.kind == "HIGH" and last_opposite_broken < p.idx < br.broken_idx
-            ]
-            if highs:
-                best = max(highs, key=lambda p: (p.price, -p.idx))
-                swing_idx = best.idx
-                swing_price = float(best.price)
+        # Переякориваем только CHOCH: для BOS оставляем штатный swing из ядра,
+        # иначе continuation может визуально ссылаться на слишком старый HH/LL
+        # и давать «дополнительный HL/LH без обновления экстремума».
+        if br.kind == "CHOCH":
+            last_opposite_broken = -1
+            for prev in reversed(visible_breaks[:br_pos]):
+                if prev.direction != br.direction:
+                    last_opposite_broken = prev.broken_idx
+                    break
+            if br.direction == "SHORT":
+                lows = [
+                    p
+                    for p in raw_pivots
+                    if p.kind == "LOW" and last_opposite_broken < p.idx < br.broken_idx
+                ]
+                if lows:
+                    best = min(lows, key=lambda p: (p.price, p.idx))
+                    swing_idx = best.idx
+                    swing_price = float(best.price)
+            else:
+                highs = [
+                    p
+                    for p in raw_pivots
+                    if p.kind == "HIGH" and last_opposite_broken < p.idx < br.broken_idx
+                ]
+                if highs:
+                    best = max(highs, key=lambda p: (p.price, -p.idx))
+                    swing_idx = best.idx
+                    swing_price = float(best.price)
         try:
             swing_open_ms = int(df.iloc[swing_idx]["open_time"])
             break_open_ms = int(df.iloc[br.broken_idx]["open_time"])
@@ -578,10 +579,39 @@ def _keep_single_retrace_pivot_per_leg(
             continue
 
         first_struct_ms = int(structures[0].get("bar_open_ms") or 0)
+        struct_times = [int(st.get("bar_open_ms") or 0) for st in structures]
+        first_before_struct_by_label: dict[tuple[str, str], int] = {}
         for i, ev in pivots:
             p_ms = int(ev.get("bar_open_ms") or 0)
-            if p_ms <= first_struct_ms or p_ms in anchor_pivot_ms:
-                keep_pivot_idx.add(i)
+            if p_ms <= first_struct_ms:
+                lbl = str(ev.get("label") or "")
+                p_kind = str(ev.get("pivot_kind") or "")
+                key = (lbl, p_kind)
+                existing_idx = first_before_struct_by_label.get(key)
+                if existing_idx is None:
+                    first_before_struct_by_label[key] = i
+                else:
+                    ex_ms = int(events[existing_idx].get("bar_open_ms") or 0)
+                    if p_ms < ex_ms:
+                        first_before_struct_by_label[key] = i
+            elif p_ms in anchor_pivot_ms:
+                lbl = str(ev.get("label") or "")
+                p_kind = str(ev.get("pivot_kind") or "")
+                prev_struct_ms = -1
+                for t in struct_times:
+                    if t >= p_ms:
+                        break
+                    prev_struct_ms = t
+                has_same_before = any(
+                    int(prev_ev.get("bar_open_ms") or 0) < p_ms
+                    and int(prev_ev.get("bar_open_ms") or 0) > prev_struct_ms
+                    and str(prev_ev.get("label") or "") == lbl
+                    and str(prev_ev.get("pivot_kind") or "") == p_kind
+                    for _, prev_ev in pivots
+                )
+                if not has_same_before:
+                    keep_pivot_idx.add(i)
+        keep_pivot_idx.update(first_before_struct_by_label.values())
 
         for idx, st in enumerate(structures):
             direction = str(st.get("direction") or "")
