@@ -946,11 +946,21 @@ def filter_pivots_by_impulse_lock(
     активного импульса (``broken_start_idx >= 0``) дополнительно показываем
     pivots, формирующие новый тренд (LH после слома HL и т.п.).
     """
-    if state is None:
-        return pivots
     legs = impulse_legs if impulse_legs is not None else extract_impulse_legs(pivots)
+    if not legs:
+        return pivots
     anchors = impulse_leg_anchor_idxs(legs)
     deepest_idxs = _deepest_retrace_idxs_per_leg(pivots, legs, anchors=anchors)
+    if state is None:
+        first_anchor_idx = min(anchors) if anchors else -1
+        out: list[Pivot] = []
+        for pivot in pivots:
+            if first_anchor_idx >= 0 and pivot.idx < first_anchor_idx:
+                out.append(pivot)
+                continue
+            if pivot.idx in anchors or pivot.idx in deepest_idxs:
+                out.append(pivot)
+        return out
 
     out: list[Pivot] = []
     for pivot in pivots:

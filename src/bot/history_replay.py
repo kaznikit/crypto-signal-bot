@@ -33,7 +33,6 @@ from bot.exchange.bybit_client import BybitClient
 from bot.market.candles import candles_to_df
 from bot.market.fibo import OteZone, is_price_in_zone
 from bot.market.pivots import (
-    _pivot_allowed_under_impulse_lock,
     compute_impulse_lock_state,
     detect_pivots,
     detect_pivots_htf,
@@ -199,18 +198,9 @@ def _emit_fresh_pivot_events(
         breaks=visible_breaks,
     )
 
-    for pivot in raw_pivots:
+    for pivot in pivots:
         if pivot.idx != confirm_idx:
             continue
-        if lock_state is not None:
-            anchors = impulse_leg_anchor_idxs(impulse_legs)
-            if not _pivot_allowed_under_impulse_lock(
-                pivot,
-                lock_state,
-                anchor_idxs=anchors,
-                impulse_legs=impulse_legs,
-            ):
-                continue
         events_out.append(
             {
                 "kind": "PIVOT",
@@ -410,6 +400,89 @@ def _dedupe_overlay_events(events: list[dict[str, Any]]) -> None:
         seen.add(key)
         keep.append(ev)
     events[:] = keep
+
+
+def _keep_single_retrace_pivot_per_leg(
+    events: list[dict[str, Any]],
+    _dfs: dict[str, Any] | None = None,
+    _cfg: Any | None = None,
+) -> None:
+    """Оставляет ровно один retrace-pivot между соседними STRUCTURE на каждом TF.
+
+    Правило:
+    - после STRUCTURE LONG ищем только LOW-пивоты (коррекция вниз), оставляем
+      самый глубокий (min price);
+    - после STRUCTURE SHORT ищем только HIGH-пивоты (коррекция вверх), оставляем
+      самый глубокий (max price).
+
+    Это устраняет ложные LH/HL без нового BOS/CHOCH и синхронизирует overlay с
+    ожиданием «одна коррекционная метка между структурными событиями».
+    """
+    piv_by_tf: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    struct_by_tf: dict[str, list[dict[str, Any]]] = {}
+    for i, ev in enumerate(events):
+        kind = str(ev.get("kind") or "")
+        tf = str(ev.get("htf") or "")
+        if not tf:
+            continue
+        if kind == "PIVOT":
+            piv_by_tf.setdefault(tf, []).append((i, ev))
+        elif kind == "STRUCTURE":
+            struct_by_tf.setdefault(tf, []).append(ev)
+
+    keep_pivot_idx: set[int] = set()
+    for tf, pivots in piv_by_tf.items():
+        structures = sorted(
+            struct_by_tf.get(tf, []),
+            key=lambda e: int(e.get("bar_open_ms") or 0),
+        )
+        if not structures:
+            keep_pivot_idx.update(i for i, _ in pivots)
+            continue
+
+        first_struct_ms = int(structures[0].get("bar_open_ms") or 0)
+        for i, ev in pivots:
+            if int(ev.get("bar_open_ms") or 0) <= first_struct_ms:
+                keep_pivot_idx.add(i)
+
+        for idx, st in enumerate(structures):
+            direction = str(st.get("direction") or "")
+            if direction not in {"LONG", "SHORT"}:
+                continue
+            start_ms = int(st.get("bar_open_ms") or 0)
+            end_ms = (
+                int(structures[idx + 1].get("bar_open_ms") or 0)
+                if idx + 1 < len(structures)
+                else 2**63 - 1
+            )
+            expected_kind = "LOW" if direction == "LONG" else "HIGH"
+            candidates: list[tuple[int, dict[str, Any]]] = []
+            for pidx, pev in pivots:
+                p_ms = int(pev.get("bar_open_ms") or 0)
+                if not (start_ms < p_ms < end_ms):
+                    continue
+                if str(pev.get("pivot_kind") or "") != expected_kind:
+                    continue
+                candidates.append((pidx, pev))
+            if not candidates:
+                continue
+            if direction == "LONG":
+                best = min(
+                    candidates,
+                    key=lambda x: (float(x[1].get("price") or 0.0), -int(x[1].get("bar_open_ms") or 0)),
+                )
+            else:
+                best = max(
+                    candidates,
+                    key=lambda x: (float(x[1].get("price") or 0.0), int(x[1].get("bar_open_ms") or 0)),
+                )
+            keep_pivot_idx.add(best[0])
+
+    out: list[dict[str, Any]] = []
+    for i, ev in enumerate(events):
+        if ev.get("kind") != "PIVOT" or i in keep_pivot_idx:
+            out.append(ev)
+    events[:] = out
 
 
 def _swing_size_for_htf(cfg: Any, tf: str) -> int:
@@ -1171,6 +1244,7 @@ async def run_history_replay(
         _dedupe_overlay_events(events_out)
         _normalize_structure_sequence(events_out)
         _filter_invalidated_impulses(events_out, dfs)
+        _keep_single_retrace_pivot_per_leg(events_out, dfs, cfg)
 
     summary = _summarize(symbol=symbol, mode=mode, closed_trades=closed_trades)
     if not quiet:

@@ -51,6 +51,8 @@ def detect_continuation_prepare(
     structure_max_bars_ago: int = 30,
     prepare_state: ContinuationPrepareState | None = None,
     ltf_expected: str = "5M",
+    setup_type: SetupType = SetupType.CONTINUATION,
+    anchor_kinds: tuple[str, ...] = ("BOS", "CHOCH"),
 ) -> tuple[Setup | None, SetupEvent | None]:
     """PREPARE-continuation: одно касание 0.5 на событие BOS/CHoCH.
 
@@ -66,6 +68,7 @@ def detect_continuation_prepare(
         return None, None
 
     last_pos = int(htf_df.index[-1])
+    choch_only_mode = set(anchor_kinds) == {"CHOCH"}
 
     breaks_all = extract_structure_breaks_htf(
         htf_df, swing_size=swing_size, use_close=bos_use_close, impulse_lock=True
@@ -79,7 +82,6 @@ def detect_continuation_prepare(
         max_bars_ago=structure_max_bars_ago,
         last_idx=last_pos,
     )
-    anchor_kinds: tuple[str, ...] = ("BOS", "CHOCH")
     last_any = latest_structure_break(
         breaks,
         kinds=anchor_kinds,
@@ -126,25 +128,26 @@ def detect_continuation_prepare(
         return None, None
 
     raw_pivots = detect_pivots(htf_df, swing_size=swing_size)
-    if prepare_suppressed_during_impulse_lock(
-        htf_df,
-        raw_pivots,
-        swing_size=swing_size,
-        use_close=bos_use_close,
-        setup_direction=structure_direction,
-    ):
-        _funnel_inc(funnel, "prepare_suppressed_impulse_lock_retracement")
-        return None, None
-    if prepare_suppressed_after_trend_flip(
-        df=htf_df,
-        raw_pivots=raw_pivots,
-        swing_size=swing_size,
-        use_close=bos_use_close,
-        setup_direction=structure_direction,
-        last_pos=last_pos,
-    ):
-        _funnel_inc(funnel, "prepare_wait_correction_pivot_after_choch")
-        return None, None
+    if not choch_only_mode:
+        if prepare_suppressed_during_impulse_lock(
+            htf_df,
+            raw_pivots,
+            swing_size=swing_size,
+            use_close=bos_use_close,
+            setup_direction=structure_direction,
+        ):
+            _funnel_inc(funnel, "prepare_suppressed_impulse_lock_retracement")
+            return None, None
+        if prepare_suppressed_after_trend_flip(
+            df=htf_df,
+            raw_pivots=raw_pivots,
+            swing_size=swing_size,
+            use_close=bos_use_close,
+            setup_direction=structure_direction,
+            last_pos=last_pos,
+        ):
+            _funnel_inc(funnel, "prepare_wait_correction_pivot_after_choch")
+            return None, None
 
     br_key = structure_break_key(htf, last_break, htf_df)
 
@@ -170,7 +173,10 @@ def detect_continuation_prepare(
         if cand.direction != structure_direction:
             _funnel_inc(funnel, "leg_direction_misaligned")
             continue
-        if cand.anchor_break_idx != last_break.broken_idx:
+        if cand.anchor_break_idx is None:
+            _funnel_inc(funnel, "leg_has_no_anchor_break")
+            continue
+        if cand.anchor_break_idx < last_break.broken_idx:
             _funnel_inc(funnel, "leg_not_confirmed_by_anchor_break")
             continue
         if last_pos - cand.end_idx > impulse_max_age_bars:
@@ -189,7 +195,7 @@ def detect_continuation_prepare(
             continue
 
         cand_trigger = cand.fib_half if fib_level == 0.5 else _fib_at(cand, fib_level)
-        since_touch = max(cand.end_idx, last_break.broken_idx)
+        since_touch = max(cand.end_idx, cand.anchor_break_idx, last_break.broken_idx)
         touch_idx = find_first_touch_idx(
             htf_df,
             direction=cand.direction,
@@ -241,14 +247,14 @@ def detect_continuation_prepare(
             return None, None
         prepare_state.prepared_leg_keys.add(leg_key)
 
-    setup_id = make_setup_id(symbol, SetupType.CONTINUATION, htf, close_time)
+    setup_id = make_setup_id(symbol, setup_type, htf, close_time)
     start_open_ms = int(htf_df.iloc[impulse.start_idx]["open_time"])
     end_open_ms = int(htf_df.iloc[impulse.end_idx]["open_time"])
     touch_open_ms = int(htf_df.iloc[touch_idx]["open_time"])
     setup = build_setup(
         setup_id=setup_id,
         symbol=symbol,
-        setup_type=SetupType.CONTINUATION,
+        setup_type=setup_type,
         direction=impulse.direction,
         htf=htf,
         ltf_expected=ltf_expected,
@@ -265,7 +271,7 @@ def detect_continuation_prepare(
         payload={
             "setup_id": setup.id,
             "symbol": symbol,
-            "type": SetupType.CONTINUATION.value,
+            "type": setup_type.value,
             "direction": impulse.direction,
             "htf": htf,
             "origin_price": trigger_level,

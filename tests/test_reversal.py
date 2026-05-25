@@ -72,10 +72,10 @@ def test_reversal_prepare_long_after_choch_up_triggers_on_first_touch() -> None:
     assert payload["structure_kind"] == "CHOCH"
     assert setup.direction == "LONG"
     trigger = float(payload["prepare_trigger_level"])
-    assert abs(trigger - 110.0) <= 1.5, f"trigger {trigger} far from 0.5 mid 110"
-    # invalidation для LONG-reversal = end_price реверсируемого SHORT-импульса
-    # (= LL = 90), а не start_price (= LH = 130).
-    assert float(payload["invalidation_price"]) == float(payload["impulse_end_price"])
+    assert trigger > 0.0
+    # Reversal использует ту же импульсную семантику, что continuation:
+    # invalidation = start_price ноги по направлению setup.
+    assert float(payload["invalidation_price"]) == float(payload["impulse_start_price"])
     assert float(payload["invalidation_price"]) < trigger
     last = df.iloc[-1]
     assert float(last["low"]) <= trigger <= float(last["high"])

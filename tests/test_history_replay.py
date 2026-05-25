@@ -5,6 +5,7 @@ from bot.history_replay import (
     OpenTrade,
     _dedupe_overlay_events,
     _filter_invalidated_impulses,
+    _keep_single_retrace_pivot_per_leg,
     _max_drawdown_r,
     _normalize_structure_sequence,
     _resolve_trade_exit,
@@ -168,3 +169,94 @@ def test_dedupe_overlay_events_removes_duplicate_pivot() -> None:
     assert len(events) == 2
     assert events[0]["kind"] == "PIVOT"
     assert events[1]["kind"] == "STRUCTURE"
+
+
+def test_keep_single_retrace_pivot_keeps_only_expected_kind_between_structure() -> None:
+    events = [
+        {
+            "kind": "PIVOT",
+            "symbol": "BTCUSDT",
+            "htf": "1H",
+            "bar_open_ms": 1,
+            "label": "HH",
+            "pivot_kind": "HIGH",
+            "price": 110.0,
+        },
+        {
+            "kind": "STRUCTURE",
+            "symbol": "BTCUSDT",
+            "htf": "1H",
+            "bar_open_ms": 10,
+            "subkind": "BOS",
+            "direction": "LONG",
+            "level": 108.0,
+        },
+        {
+            "kind": "PIVOT",
+            "symbol": "BTCUSDT",
+            "htf": "1H",
+            "bar_open_ms": 11,
+            "label": "LH",
+            "pivot_kind": "HIGH",
+            "price": 109.0,
+        },
+        {
+            "kind": "PIVOT",
+            "symbol": "BTCUSDT",
+            "htf": "1H",
+            "bar_open_ms": 12,
+            "label": "HL",
+            "pivot_kind": "LOW",
+            "price": 101.0,
+        },
+        {
+            "kind": "PIVOT",
+            "symbol": "BTCUSDT",
+            "htf": "1H",
+            "bar_open_ms": 13,
+            "label": "HL",
+            "pivot_kind": "LOW",
+            "price": 99.0,
+        },
+        {
+            "kind": "STRUCTURE",
+            "symbol": "BTCUSDT",
+            "htf": "1H",
+            "bar_open_ms": 20,
+            "subkind": "CHOCH",
+            "direction": "SHORT",
+            "level": 100.0,
+        },
+        {
+            "kind": "PIVOT",
+            "symbol": "BTCUSDT",
+            "htf": "1H",
+            "bar_open_ms": 21,
+            "label": "LH",
+            "pivot_kind": "HIGH",
+            "price": 106.0,
+        },
+        {
+            "kind": "PIVOT",
+            "symbol": "BTCUSDT",
+            "htf": "1H",
+            "bar_open_ms": 22,
+            "label": "HL",
+            "pivot_kind": "LOW",
+            "price": 97.0,
+        },
+        {
+            "kind": "PIVOT",
+            "symbol": "BTCUSDT",
+            "htf": "1H",
+            "bar_open_ms": 23,
+            "label": "LH",
+            "pivot_kind": "HIGH",
+            "price": 108.0,
+        },
+    ]
+
+    _keep_single_retrace_pivot_per_leg(events)
+
+    pivots = [e for e in events if e.get("kind") == "PIVOT"]
+    assert {int(p["bar_open_ms"]) for p in pivots} == {1, 13, 23}
