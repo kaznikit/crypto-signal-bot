@@ -7,6 +7,7 @@ from bot.market.pivots import (
     ImpulseLockState,
     Pivot,
     StructureBreak,
+    prepare_suppressed_after_trend_flip,
     compute_impulse_lock_state,
     detect_pivots,
     detect_pivots_htf,
@@ -284,7 +285,13 @@ def test_continuation_short_does_not_fire_before_lh_ll_impulse() -> None:
             continue
         if setup.direction != "SHORT":
             continue
-        legs = extract_impulse_legs(detect_pivots(df_slice, swing_size=3))
+        raw_pivots = detect_pivots(df_slice, swing_size=3)
+        breaks_htf = extract_structure_breaks_htf(
+            df_slice, swing_size=3, use_close=True, impulse_lock=True
+        )
+        legs = extract_impulse_legs_confirmed(
+            raw_pivots, breaks_htf, swing_size=3, df=df_slice
+        )
         has_short_impulse = any(leg.direction == "SHORT" for leg in legs)
         if not has_short_impulse:
             saw_p_short_before_lh_ll = True
@@ -379,6 +386,60 @@ def test_apply_impulse_invalidation_choch_not_downgraded_by_reclassify() -> None
     assert at_inv[0].swing_price == 100.0
 
 
+def test_apply_impulse_invalidation_removes_inner_break_at_same_bar() -> None:
+    """На баре inv остаётся только synthetic CHOCH от HL/LH импульса."""
+    state = ImpulseLockState(
+        leg=ImpulseLeg("LONG", 5, 100.0, 50, 200.0),
+        lock_from_idx=90,
+        broken_start_idx=80,
+        broken_end_idx=-1,
+    )
+    breaks = [
+        StructureBreak("LONG", "BOS", 50, 200.0, 40),
+        # Внутренний low на том же баре слома HL: не должен оставаться в выдаче.
+        StructureBreak("SHORT", "BOS", 70, 110.0, 80),
+    ]
+    out = apply_impulse_invalidation_choch(breaks, state)
+    at_inv = [b for b in out if b.direction == "SHORT" and b.broken_idx == 80]
+    assert len(at_inv) == 1
+    assert at_inv[0].kind == "CHOCH"
+    assert at_inv[0].swing_idx == 5
+    assert at_inv[0].swing_price == 100.0
+
+
+def test_prepare_suppressed_after_trend_flip_allows_confirm_bar(monkeypatch) -> None:
+    """На баре подтверждения первого LH/HL suppression должен сниматься."""
+    import pandas as pd
+
+    state = ImpulseLockState(
+        leg=ImpulseLeg("LONG", 0, 100.0, 8, 130.0),
+        lock_from_idx=12,
+        broken_start_idx=9,
+        broken_end_idx=-1,
+    )
+    raw_pivots = [Pivot(idx=10, kind="HIGH", price=120.0, label="LH")]
+    df = _df([100.0] * 16, spread=0.1)
+
+    monkeypatch.setattr(
+        "bot.market.pivots.extract_structure_breaks",
+        lambda df, swing_size, use_close=True: [],
+    )
+    monkeypatch.setattr(
+        "bot.market.pivots.compute_impulse_lock_state",
+        lambda df, pivots, swing_size, use_close=True, breaks=None: state,
+    )
+
+    suppressed = prepare_suppressed_after_trend_flip(
+        df=df,
+        raw_pivots=raw_pivots,
+        swing_size=3,
+        use_close=True,
+        setup_direction="SHORT",
+        last_pos=13,  # confirm = idx(10) + swing(3)
+    )
+    assert not suppressed
+
+
 def test_extract_structure_breaks_htf_reclassifies_double_choch(monkeypatch) -> None:
     """После impulse-lock второй подряд CHOCH того же направления становится BOS."""
     raw = [
@@ -425,8 +486,161 @@ def test_extract_structure_breaks_htf_reclassifies_double_choch(monkeypatch) -> 
     assert out[2].direction == "SHORT" and out[2].kind == "BOS"
 
 
+def test_extract_structure_breaks_htf_keeps_invalidation_choch_anchor(monkeypatch) -> None:
+    """Даже после reclassify на баре inv должен остаться CHOCH от HL/LH."""
+    dummy_state = ImpulseLockState(
+        leg=ImpulseLeg("LONG", 5, 100.0, 50, 200.0),
+        lock_from_idx=55,
+        broken_start_idx=80,
+        broken_end_idx=-1,
+    )
+    raw = [StructureBreak("LONG", "BOS", 50, 200.0, 40)]
+
+    monkeypatch.setattr(
+        "bot.market.pivots.extract_structure_breaks",
+        lambda df, swing_size, use_close=True: raw,
+    )
+    monkeypatch.setattr(
+        "bot.market.pivots.detect_pivots",
+        lambda df, swing_size: [Pivot(5, "LOW", 100.0, "HL"), Pivot(50, "HIGH", 200.0, "HH")],
+    )
+    monkeypatch.setattr(
+        "bot.market.pivots.compute_impulse_lock_state",
+        lambda df, pivots, swing_size, use_close=True, breaks=None: dummy_state,
+    )
+    monkeypatch.setattr(
+        "bot.market.pivots.filter_structure_breaks_by_impulse_lock",
+        lambda breaks, state: breaks,
+    )
+    # Подмешиваем synthetic CHOCH, который потом "ломает" reclassify.
+    monkeypatch.setattr(
+        "bot.market.pivots.apply_impulse_invalidation_choch",
+        lambda breaks, state: breaks
+        + [StructureBreak("SHORT", "CHOCH", 5, 100.0, 80)],
+    )
+    monkeypatch.setattr(
+        "bot.market.pivots.reclassify_structure_break_kinds",
+        lambda breaks: [StructureBreak("LONG", "BOS", 50, 200.0, 40), StructureBreak("SHORT", "BOS", 70, 110.0, 80)],
+    )
+
+    out = extract_structure_breaks_htf(
+        _df([100.0] * 120, spread=0.1),
+        swing_size=3,
+        use_close=True,
+        impulse_lock=True,
+    )
+    inv = [b for b in out if b.direction == "SHORT" and b.broken_idx == 80]
+    assert len(inv) == 1
+    assert inv[0].kind == "CHOCH"
+    assert inv[0].swing_idx == 5
+    assert inv[0].swing_price == 100.0
+
+
+def test_extract_structure_breaks_htf_collapses_early_flip_probe(monkeypatch) -> None:
+    """Ранний CHOCH перед быстрым BOS той же стороны схлопывается в один CHOCH."""
+    raw = [
+        StructureBreak("LONG", "BOS", 10, 110.0, 20),
+        StructureBreak("SHORT", "CHOCH", 30, 99.0, 40),
+        StructureBreak("SHORT", "BOS", 41, 95.0, 48),
+        StructureBreak("SHORT", "BOS", 50, 90.0, 70),
+    ]
+
+    monkeypatch.setattr(
+        "bot.market.pivots.extract_structure_breaks",
+        lambda df, swing_size, use_close=True: raw,
+    )
+    monkeypatch.setattr(
+        "bot.market.pivots.detect_pivots",
+        lambda df, swing_size: [Pivot(0, "LOW", 100.0, "HL"), Pivot(10, "HIGH", 130.0, "HH")],
+    )
+    monkeypatch.setattr(
+        "bot.market.pivots.compute_impulse_lock_state",
+        lambda df, pivots, swing_size, use_close=True, breaks=None: None,
+    )
+
+    out = extract_structure_breaks_htf(
+        _df([100.0] * 120, spread=0.1),
+        swing_size=4,
+        use_close=True,
+        impulse_lock=True,
+    )
+    shorts = [b for b in out if b.direction == "SHORT"]
+    assert len(shorts) == 2
+    assert shorts[0].broken_idx == 48
+    assert shorts[0].kind == "CHOCH"
+    assert shorts[0].swing_idx == 30
+    assert shorts[0].swing_price == 99.0
+    assert shorts[1].broken_idx == 70
+    assert shorts[1].kind == "BOS"
+
+
+def test_extract_structure_breaks_htf_collapsed_flip_keeps_probe_swing(monkeypatch) -> None:
+    """Core structure: collapsed CHOCH сохраняет swing исходного probe-break."""
+    raw = [
+        StructureBreak("LONG", "BOS", 10, 110.0, 20),
+        StructureBreak("SHORT", "CHOCH", 30, 99.0, 40),  # ранний probe
+        StructureBreak("SHORT", "BOS", 41, 95.0, 48),    # подтверждение flip
+    ]
+    pivs = [
+        Pivot(25, "LOW", 90.0, "HL"),   # ожидаемый HL-уровень flip
+        Pivot(30, "LOW", 99.0, "HL"),   # локальный probe-level (должен быть отброшен)
+        Pivot(41, "HIGH", 105.0, "LH"),
+    ]
+    monkeypatch.setattr(
+        "bot.market.pivots.extract_structure_breaks",
+        lambda df, swing_size, use_close=True: raw,
+    )
+    monkeypatch.setattr(
+        "bot.market.pivots.detect_pivots",
+        lambda df, swing_size: pivs,
+    )
+    monkeypatch.setattr(
+        "bot.market.pivots.compute_impulse_lock_state",
+        lambda df, pivots, swing_size, use_close=True, breaks=None: None,
+    )
+
+    out = extract_structure_breaks_htf(
+        _df([100.0] * 80, spread=0.1),
+        swing_size=4,
+        use_close=True,
+        impulse_lock=True,
+    )
+    flip = [b for b in out if b.direction == "SHORT"][0]
+    assert flip.kind == "CHOCH"
+    assert flip.broken_idx == 48
+    assert flip.swing_idx == 30
+    assert flip.swing_price == 99.0
+
+
+def test_confirmed_short_leg_after_choch_uses_recent_segment_low() -> None:
+    """После CHOCH SHORT нога должна строиться на свежем LL после swing, не на старом low."""
+    swing = 4
+    pivots = [
+        Pivot(idx=730, kind="LOW", price=4.906, label="HL"),
+        Pivot(idx=742, kind="LOW", price=5.036, label="HL"),
+        Pivot(idx=744, kind="HIGH", price=5.325, label="LH"),
+        Pivot(idx=747, kind="LOW", price=5.041, label="HL"),
+        Pivot(idx=749, kind="HIGH", price=5.272, label="LH"),
+        Pivot(idx=754, kind="HIGH", price=5.284, label="HH"),
+        Pivot(idx=758, kind="LOW", price=4.936, label="LL"),
+        Pivot(idx=763, kind="HIGH", price=5.208, label="LH"),
+        Pivot(idx=766, kind="LOW", price=4.739, label="LL"),
+    ]
+    breaks = [
+        StructureBreak("LONG", "BOS", swing_idx=692, swing_price=4.95, broken_idx=703),
+        StructureBreak("SHORT", "CHOCH", swing_idx=758, swing_price=4.936, broken_idx=765),
+    ]
+    legs = extract_impulse_legs_confirmed(pivots, breaks, swing_size=swing)
+    shorts = [leg for leg in legs if leg.direction == "SHORT"]
+    assert shorts
+    last = shorts[-1]
+    assert last.start_idx == 763
+    assert last.end_idx == 766
+    assert last.anchor_break_idx == 765
+
+
 def test_break_of_hl_is_choch_even_before_lock_confirmed() -> None:
-    """Если слом HL пришёл раньше чем end+swing, на самом баре должен быть CHOCH."""
+    """Ранний flip-пробой до подтверждения новой ноги не должен закрепляться как CHOCH."""
     closes = [
         100.13255711869463,
         99.89575188177145,
@@ -498,7 +712,7 @@ def test_break_of_hl_is_choch_even_before_lock_confirmed() -> None:
     )
     short_breaks = [b for b in breaks if b.direction == "SHORT" and b.broken_idx == 47]
     assert short_breaks
-    assert short_breaks[-1].kind == "CHOCH"
+    assert short_breaks[-1].kind == "BOS"
 
 
 def test_pivot_label_relabels_false_ll_above_hl() -> None:

@@ -240,14 +240,62 @@ def _emit_fresh_pivot_events(
                 "bar_open_ms": int(df.iloc[last_pos]["open_time"]),
             }
         )
-    for br in visible_breaks:
+    for br_pos, br in enumerate(visible_breaks):
         if br.broken_idx != last_pos:
             continue
+        swing_idx = br.swing_idx
+        swing_price = float(br.swing_price)
+        # Для overlay переякориваем CHOCH/BOS к структурному HL/LH сегмента
+        # (между последним opposite break и текущим break), чтобы линия
+        # STRUCTURE визуально шла от ожидаемой опорной точки.
+        last_opposite_broken = -1
+        for prev in reversed(visible_breaks[:br_pos]):
+            if prev.direction != br.direction:
+                last_opposite_broken = prev.broken_idx
+                break
+        if br.direction == "SHORT":
+            lows = [
+                p
+                for p in raw_pivots
+                if p.kind == "LOW" and last_opposite_broken < p.idx < br.broken_idx
+            ]
+            if lows:
+                best = min(lows, key=lambda p: (p.price, p.idx))
+                swing_idx = best.idx
+                swing_price = float(best.price)
+        else:
+            highs = [
+                p
+                for p in raw_pivots
+                if p.kind == "HIGH" and last_opposite_broken < p.idx < br.broken_idx
+            ]
+            if highs:
+                best = max(highs, key=lambda p: (p.price, -p.idx))
+                swing_idx = best.idx
+                swing_price = float(best.price)
         try:
-            swing_open_ms = int(df.iloc[br.swing_idx]["open_time"])
+            swing_open_ms = int(df.iloc[swing_idx]["open_time"])
             break_open_ms = int(df.iloc[br.broken_idx]["open_time"])
         except (KeyError, IndexError):
             continue
+        # Если swing-pivot был скрыт HTF фильтрацией, но именно от него строится
+        # STRUCTURE, добавляем pivot в overlay ретроспективно, чтобы CHOCH/BOS
+        # визуально «шёл от HL/LH».
+        swing_pivot = next((p for p in raw_pivots if p.idx == swing_idx), None)
+        if swing_pivot is not None:
+            events_out.append(
+                {
+                    "kind": "PIVOT",
+                    "symbol": symbol,
+                    "htf": htf,
+                    "label": pivot_label_for_htf_display(
+                        swing_pivot, lock_state, impulse_legs=impulse_legs
+                    ),
+                    "pivot_kind": swing_pivot.kind,
+                    "price": float(swing_pivot.price),
+                    "bar_open_ms": swing_open_ms,
+                }
+            )
         events_out.append(
             {
                 "kind": "STRUCTURE",
@@ -255,7 +303,7 @@ def _emit_fresh_pivot_events(
                 "htf": htf,
                 "subkind": br.kind,
                 "direction": br.direction,
-                "level": float(br.swing_price),
+                    "level": swing_price,
                 "swing_open_ms": swing_open_ms,
                 "bar_open_ms": break_open_ms,
             }
@@ -353,6 +401,90 @@ def _normalize_structure_sequence(events: list[dict[str, Any]]) -> None:
         last_dir_by_htf[htf] = direction
 
 
+def _filter_stale_structure_events(
+    events: list[dict[str, Any]],
+    dfs: dict[str, Any],
+    cfg: Any,
+) -> None:
+    """Оставляет только STRUCTURE, которые присутствуют в финальном HTF-пересчёте.
+
+    В walk-forward ранние flip-пробои могут исчезать после появления более
+    валидного BOS/CHoCH в том же сегменте (ретроспективная нормализация
+    ``extract_structure_breaks_htf``). Для overlay сохраняем только итоговые
+    видимые STRUCTURE по полному хвосту каждого HTF.
+    """
+    valid_by_htf: dict[str, set[tuple[int, str]]] = {}
+    for htf, df in dfs.items():
+        if df is None or df.empty:
+            continue
+        swing = _swing_size_for_htf(cfg, htf)
+        breaks = extract_structure_breaks_htf(
+            df,
+            swing_size=swing,
+            use_close=cfg.pivots.bos_use_close,
+            impulse_lock=True,
+        )
+        keys: set[tuple[int, str]] = set()
+        for br in breaks:
+            try:
+                broken_open_ms = int(df.iloc[br.broken_idx]["open_time"])
+            except (KeyError, IndexError):
+                continue
+            keys.add((broken_open_ms, br.direction))
+        valid_by_htf[htf] = keys
+
+    out: list[dict[str, Any]] = []
+    removed_prepare_ids: set[str] = set()
+    kept_prepare_ids: set[str] = set()
+    for ev in events:
+        kind = str(ev.get("kind") or "")
+        if kind == "PREPARE":
+            htf = str(ev.get("htf") or "")
+            valid = valid_by_htf.get(htf)
+            if valid is None:
+                out.append(ev)
+                if ev.get("setup_id"):
+                    kept_prepare_ids.add(str(ev.get("setup_id")))
+                continue
+            key = (
+                int(ev.get("structure_broken_open_ms") or 0),
+                str(ev.get("direction") or ""),
+            )
+            if key in valid:
+                out.append(ev)
+                if ev.get("setup_id"):
+                    kept_prepare_ids.add(str(ev.get("setup_id")))
+            else:
+                if ev.get("setup_id"):
+                    removed_prepare_ids.add(str(ev.get("setup_id")))
+            continue
+        if kind != "STRUCTURE":
+            out.append(ev)
+            continue
+        htf = str(ev.get("htf") or "")
+        valid = valid_by_htf.get(htf)
+        if valid is None:
+            out.append(ev)
+            continue
+        key = (
+            int(ev.get("bar_open_ms") or 0),
+            str(ev.get("direction") or ""),
+        )
+        if key in valid:
+            out.append(ev)
+    if removed_prepare_ids:
+        out = [
+            ev
+            for ev in out
+            if not (
+                str(ev.get("kind") or "") in {"ENTRY", "INVALIDATED"}
+                and str(ev.get("setup_id") or "") in removed_prepare_ids
+                and str(ev.get("setup_id") or "") not in kept_prepare_ids
+            )
+        ]
+    events[:] = out
+
+
 def _dedupe_overlay_events(events: list[dict[str, Any]]) -> None:
     """Удаляет дубли PIVOT/STRUCTURE/IMPULSE/PREPARE по стабильным ключам."""
     keep: list[dict[str, Any]] = []
@@ -436,13 +568,19 @@ def _keep_single_retrace_pivot_per_leg(
             struct_by_tf.get(tf, []),
             key=lambda e: int(e.get("bar_open_ms") or 0),
         )
+        anchor_pivot_ms = {
+            int(e.get("swing_open_ms") or 0)
+            for e in structures
+            if int(e.get("swing_open_ms") or 0) > 0
+        }
         if not structures:
             keep_pivot_idx.update(i for i, _ in pivots)
             continue
 
         first_struct_ms = int(structures[0].get("bar_open_ms") or 0)
         for i, ev in pivots:
-            if int(ev.get("bar_open_ms") or 0) <= first_struct_ms:
+            p_ms = int(ev.get("bar_open_ms") or 0)
+            if p_ms <= first_struct_ms or p_ms in anchor_pivot_ms:
                 keep_pivot_idx.add(i)
 
         for idx, st in enumerate(structures):
@@ -1242,6 +1380,7 @@ async def run_history_replay(
 
     if events_out is not None:
         _dedupe_overlay_events(events_out)
+        _filter_stale_structure_events(events_out, dfs, cfg)
         _normalize_structure_sequence(events_out)
         _filter_invalidated_impulses(events_out, dfs)
         _keep_single_retrace_pivot_per_leg(events_out, dfs, cfg)

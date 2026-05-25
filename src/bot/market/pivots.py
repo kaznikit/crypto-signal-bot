@@ -294,7 +294,13 @@ def _build_leg_from_break(
         end_kind, start_kind = "LOW", "HIGH"
         preferred_start_label = "LH"
 
-    after_end_idx = max(min_end_idx, -1)
+    # End ноги (HH/LL) не может быть старее свинга, который пробивается этим break.
+    # Иначе при CHOCH/BOS возможно «прилипание» к старому экстремуму из предыдущего
+    # сегмента и потеря актуальной ноги (например, SHORT после свежего CHOCH).
+    if br.kind == "CHOCH":
+        after_end_idx = max(min_end_idx, br.swing_idx - 1)
+    else:
+        after_end_idx = max(min_end_idx, -1)
 
     # 1) Сначала ищем подтверждённый ``end`` ВНУТРИ текущего сегмента (между
     #    предыдущим break того же направления и ``broken_idx``) — это покрывает
@@ -1046,14 +1052,16 @@ def apply_impulse_invalidation_choch(
     choch_dir = "SHORT" if leg.direction == "LONG" else "LONG"
     choch = impulse_invalidation_structure_break(state)
     assert choch is not None
-    # Убираем все SHORT-пробои в окне ретрейса до/на inv — иначе reclassify
-    # превратит наш CHoCH в BOS.
+    # Убираем все контр-пробои после пика импульса и до/на inv — иначе reclassify
+    # может превратить synthetic CHoCH в BOS (если в списке уже есть SHORT/LONG
+    # пробой на том же баре, но от внутреннего low/high, а не от HL/LH импульса).
+    start_after_peak = leg.end_idx + 1
     kept = [
         b
         for b in breaks
         if not (
             b.direction == choch_dir
-            and state.lock_from_idx <= b.broken_idx <= inv
+            and start_after_peak <= b.broken_idx <= inv
         )
     ]
     kept.append(choch)
@@ -1090,6 +1098,56 @@ def reclassify_structure_break_kinds(
                     broken_idx=br.broken_idx,
                 )
             )
+    return out
+
+
+def collapse_early_trend_flip_probe(
+    breaks: list[StructureBreak],
+    *,
+    swing_size: int,
+) -> list[StructureBreak]:
+    """Схлопывает ранний CHOCH-пробой перед первым валидным flip-break.
+
+    Паттерн:
+    - ``CHOCH`` в новую сторону;
+    - следом ``BOS`` в ту же сторону в пределах ``2 * swing_size`` баров;
+    - swing второго пробоя сформирован уже после первого (``cur.broken_idx < nxt.swing_idx``).
+
+    В таком случае первый пробой считаем преждевременным «probe» и удаляем.
+    После удаления выполняется обычный ``reclassify_structure_break_kinds``.
+    """
+    if len(breaks) < 2:
+        return breaks
+    out: list[StructureBreak] = []
+    i = 0
+    max_gap = max(1, 2 * swing_size)
+    while i < len(breaks):
+        cur = breaks[i]
+        if i + 1 < len(breaks):
+            nxt = breaks[i + 1]
+            if (
+                cur.kind == "CHOCH"
+                and nxt.kind == "BOS"
+                and cur.direction == nxt.direction
+                and 0 <= (nxt.broken_idx - cur.broken_idx) <= max_gap
+                and cur.broken_idx < nxt.swing_idx
+            ):
+                # Объединяем пару в один flip на более позднем bar_open, но с
+                # уровнем CHOCH от исходного HL/LH (probe-бар задаёт корректный
+                # structure level, поздний BOS — момент подтверждения).
+                out.append(
+                    StructureBreak(
+                        direction=nxt.direction,
+                        kind="CHOCH",
+                        swing_idx=cur.swing_idx,
+                        swing_price=cur.swing_price,
+                        broken_idx=nxt.broken_idx,
+                    )
+                )
+                i += 2
+                continue
+        out.append(cur)
+        i += 1
     return out
 
 
@@ -1146,7 +1204,9 @@ def prepare_suppressed_after_trend_flip(
     )
     if confirm < 0:
         return True
-    return last_pos <= confirm
+    # На баре подтверждения первого LH/HL разрешаем PREPARE: если в этот же бар
+    # случился первый валидный touch 0.5, сигнал не должен теряться.
+    return last_pos < confirm
 
 
 def latest_choch_break(
@@ -1253,6 +1313,34 @@ def extract_structure_breaks_htf(
     breaks = extract_structure_breaks(df, swing_size=swing_size, use_close=use_close)
     if not impulse_lock:
         return breaks
+
+    def _postprocess_visible(
+        visible_breaks: list[StructureBreak],
+        state_local: ImpulseLockState | None,
+    ) -> list[StructureBreak]:
+        reclassified_local = reclassify_structure_break_kinds(visible_breaks)
+        collapsed_local = collapse_early_trend_flip_probe(
+            reclassified_local, swing_size=swing_size
+        )
+        if len(collapsed_local) != len(reclassified_local):
+            reclassified_local = reclassify_structure_break_kinds(collapsed_local)
+        inv_local = impulse_invalidation_structure_break(state_local)
+        if inv_local is None:
+            return reclassified_local
+        # Зафиксировать CHOCH именно от HL/LH ноги на баре инвалидации:
+        # reclassify может ретроспективно перевесить его в BOS.
+        out_local = [
+            b
+            for b in reclassified_local
+            if not (
+                b.direction == inv_local.direction
+                and b.broken_idx == inv_local.broken_idx
+            )
+        ]
+        out_local.append(inv_local)
+        out_local.sort(key=lambda b: (b.broken_idx, b.swing_idx))
+        return out_local
+
     pivots = detect_pivots(df, swing_size=swing_size)
     state = compute_impulse_lock_state(
         df,
@@ -1262,12 +1350,12 @@ def extract_structure_breaks_htf(
         breaks=breaks,
     )
     if state is None:
-        return breaks
+        return _postprocess_visible(breaks, None)
     filtered = filter_structure_breaks_by_impulse_lock(breaks, state)
     with_invalidation = apply_impulse_invalidation_choch(filtered, state)
-    # После фильтрации/подмешивания синтетического CHOCH пересчитываем видимые
-    # BOS/CHOCH по порядку событий, чтобы не было двух CHOCH подряд.
-    return reclassify_structure_break_kinds(with_invalidation)
+    # После фильтрации/подмешивания synthetic CHOCH пересчитываем и нормализуем
+    # видимые BOS/CHOCH по порядку событий.
+    return _postprocess_visible(with_invalidation, state)
 
 
 def structure_break_key(

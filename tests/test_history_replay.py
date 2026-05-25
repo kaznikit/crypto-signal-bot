@@ -3,8 +3,10 @@ import pandas as pd
 from bot.history_replay import (
     ClosedTrade,
     OpenTrade,
+    _emit_fresh_pivot_events,
     _dedupe_overlay_events,
     _filter_invalidated_impulses,
+    _filter_stale_structure_events,
     _keep_single_retrace_pivot_per_leg,
     _max_drawdown_r,
     _normalize_structure_sequence,
@@ -171,6 +173,176 @@ def test_dedupe_overlay_events_removes_duplicate_pivot() -> None:
     assert events[1]["kind"] == "STRUCTURE"
 
 
+def test_filter_stale_structure_events_drops_early_probe(monkeypatch) -> None:
+    df = pd.DataFrame(
+        [
+            {"open_time": 1000, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0},
+            {"open_time": 2000, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0},
+            {"open_time": 3000, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0},
+        ]
+    )
+    events = [
+        {
+            "kind": "STRUCTURE",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "bar_open_ms": 1000,
+            "swing_open_ms": 900,
+            "direction": "SHORT",
+            "subkind": "CHOCH",
+        },
+        {
+            "kind": "STRUCTURE",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "bar_open_ms": 3000,
+            "swing_open_ms": 2000,
+            "direction": "SHORT",
+            "subkind": "BOS",
+        },
+        {"kind": "PIVOT", "htf": "1H", "bar_open_ms": 3000, "label": "LH", "pivot_kind": "HIGH"},
+    ]
+
+    from bot.market.pivots import StructureBreak
+
+    monkeypatch.setattr(
+        "bot.history_replay.extract_structure_breaks_htf",
+        lambda *args, **kwargs: [StructureBreak("SHORT", "CHOCH", 1, 0.0, 2)],
+    )
+
+    class _Pivots:
+        swing_size_by_tf = {"1H": 4}
+        bos_use_close = True
+
+    class _Cfg:
+        pivots = _Pivots()
+
+    _filter_stale_structure_events(events, {"1H": df}, _Cfg())
+
+    kinds = [e["kind"] for e in events]
+    assert kinds.count("STRUCTURE") == 1
+    assert events[0]["bar_open_ms"] == 3000
+    assert events[0]["direction"] == "SHORT"
+
+
+def test_emit_fresh_pivot_events_adds_swing_pivot_for_structure_anchor(monkeypatch) -> None:
+    df = pd.DataFrame(
+        [
+            {"open_time": 1000, "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 1.0},
+            {"open_time": 2000, "open": 1.0, "high": 1.1, "low": 0.8, "close": 0.9, "volume": 1.0},
+            {"open_time": 3000, "open": 0.9, "high": 1.0, "low": 0.7, "close": 0.8, "volume": 1.0},
+        ]
+    )
+    from bot.market.pivots import Pivot, StructureBreak
+
+    monkeypatch.setattr(
+        "bot.history_replay.detect_pivots",
+        lambda *_args, **_kwargs: [Pivot(idx=1, kind="LOW", price=0.8, label="HL")],
+    )
+    monkeypatch.setattr(
+        "bot.history_replay.detect_pivots_htf",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "bot.history_replay.extract_structure_breaks_htf",
+        lambda *_args, **_kwargs: [
+            StructureBreak("SHORT", "CHOCH", swing_idx=1, swing_price=0.8, broken_idx=2)
+        ],
+    )
+    monkeypatch.setattr(
+        "bot.history_replay.extract_impulse_legs_confirmed",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "bot.history_replay.compute_impulse_lock_state",
+        lambda *_args, **_kwargs: None,
+    )
+    events: list[dict[str, object]] = []
+    _emit_fresh_pivot_events(
+        df=df,
+        htf="1H",
+        symbol="INJUSDT",
+        swing_size=1,
+        bos_use_close=True,
+        events_out=events,
+    )
+    assert any(
+        ev.get("kind") == "PIVOT" and int(ev.get("bar_open_ms") or 0) == 2000
+        for ev in events
+    )
+    assert any(
+        ev.get("kind") == "STRUCTURE" and int(ev.get("bar_open_ms") or 0) == 3000
+        for ev in events
+    )
+
+
+def test_filter_stale_structure_events_drops_prepare_without_valid_structure(monkeypatch) -> None:
+    df = pd.DataFrame(
+        [
+            {"open_time": 1000, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0},
+            {"open_time": 2000, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0},
+            {"open_time": 3000, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0},
+        ]
+    )
+    events = [
+        {
+            "kind": "PREPARE",
+            "setup_id": "s-old",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "direction": "SHORT",
+            "structure_broken_open_ms": 1000,
+            "structure_swing_open_ms": 900,
+        },
+        {
+            "kind": "ENTRY",
+            "setup_id": "s-old",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "direction": "SHORT",
+            "bar_open_ms": 1500,
+        },
+        {
+            "kind": "PREPARE",
+            "setup_id": "s-new",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "direction": "SHORT",
+            "structure_broken_open_ms": 3000,
+            "structure_swing_open_ms": 2000,
+        },
+        {
+            "kind": "ENTRY",
+            "setup_id": "s-new",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "direction": "SHORT",
+            "bar_open_ms": 3100,
+        },
+    ]
+    from bot.market.pivots import StructureBreak
+
+    monkeypatch.setattr(
+        "bot.history_replay.extract_structure_breaks_htf",
+        lambda *args, **kwargs: [StructureBreak("SHORT", "CHOCH", 1, 0.0, 2)],
+    )
+
+    class _Pivots:
+        swing_size_by_tf = {"1H": 4}
+        bos_use_close = True
+
+    class _Cfg:
+        pivots = _Pivots()
+
+    _filter_stale_structure_events(events, {"1H": df}, _Cfg())
+
+    kinds = [(e["kind"], e.get("setup_id")) for e in events]
+    assert ("PREPARE", "s-old") not in kinds
+    assert ("ENTRY", "s-old") not in kinds
+    assert ("PREPARE", "s-new") in kinds
+    assert ("ENTRY", "s-new") in kinds
+
+
 def test_keep_single_retrace_pivot_keeps_only_expected_kind_between_structure() -> None:
     events = [
         {
@@ -260,3 +432,48 @@ def test_keep_single_retrace_pivot_keeps_only_expected_kind_between_structure() 
 
     pivots = [e for e in events if e.get("kind") == "PIVOT"]
     assert {int(p["bar_open_ms"]) for p in pivots} == {1, 13, 23}
+
+
+def test_keep_single_retrace_pivot_preserves_structure_anchor_pivot() -> None:
+    events = [
+        {
+            "kind": "PIVOT",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "bar_open_ms": 1,
+            "label": "HH",
+            "pivot_kind": "HIGH",
+            "price": 5.3,
+        },
+        {
+            "kind": "PIVOT",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "bar_open_ms": 2,
+            "label": "HL",
+            "pivot_kind": "LOW",
+            "price": 5.04,
+        },
+        {
+            "kind": "PIVOT",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "bar_open_ms": 3,
+            "label": "LH",
+            "pivot_kind": "HIGH",
+            "price": 5.2,
+        },
+        {
+            "kind": "STRUCTURE",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "bar_open_ms": 10,
+            "subkind": "CHOCH",
+            "direction": "SHORT",
+            "level": 5.04,
+            "swing_open_ms": 2,
+        },
+    ]
+    _keep_single_retrace_pivot_per_leg(events)
+    pivots = [e for e in events if e.get("kind") == "PIVOT"]
+    assert any(int(p["bar_open_ms"]) == 2 for p in pivots)
