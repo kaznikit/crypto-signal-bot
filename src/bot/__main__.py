@@ -161,25 +161,32 @@ class SignalBotApp:
                 df_4h_for_alignment = df
 
         prepare_htfs = self._cfg.prepare_htfs()
-        if "4H" in prepare_htfs and "4H" in series:
-            await self._try_create_reversal(
-                symbol,
-                series["4H"],
-                funnel,
-                armed_keys,
-                active_by_key,
-            )
-        for htf in prepare_htfs:
-            if htf in series:
-                await self._try_create_continuation(
+        # На символ допускаем только один активный PREPARE: пока setup ARMED,
+        # новые PREPARE не создаём и ждём ENTRY/INVALIDATED/EXPIRED.
+        if armed_keys:
+            funnel["prepare_creation_skipped_active_setup"] += len(armed_keys)
+        else:
+            if "4H" in prepare_htfs and "4H" in series:
+                await self._try_create_reversal(
                     symbol,
-                    htf,
-                    series[htf],
-                    df_4h_for_alignment,
+                    series["4H"],
                     funnel,
                     armed_keys,
                     active_by_key,
                 )
+            for htf in prepare_htfs:
+                if armed_keys:
+                    break
+                if htf in series:
+                    await self._try_create_continuation(
+                        symbol,
+                        htf,
+                        series[htf],
+                        df_4h_for_alignment,
+                        funnel,
+                        armed_keys,
+                        active_by_key,
+                    )
         await self._advance_active_setups(
             symbol=symbol,
             series=series,
