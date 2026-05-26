@@ -8,15 +8,15 @@ from typing import Any
 
 from bot.analyzer.continuation import detect_continuation_prepare
 from bot.analyzer.entry_ltf import (
-    finest_closed_ltf,
     invalidation_tf_for_setup,
     ltf_expected_for_htf,
     prepare_since_open_ms,
-    try_entry_confirm,
 )
 from bot.analyzer.filters import atr_percent, close_beyond_level, finalize_entry_levels
 from bot.analyzer.reversal import detect_reversal_prepare
+from bot.analyzer.setup_lifecycle import decide_setup_structure_transition
 from bot.analyzer.setup_machine import tick_setup
+from bot.analyzer.setup_runtime import check_price_invalidation, resolve_ltf_confirmation
 from bot.analyzer.strategy_gates import (
     evaluate_continuation_prepare_detailed,
     evaluate_continuation_prepare_liberal,
@@ -26,11 +26,7 @@ from bot.analyzer.strategy_gates import (
 from bot.config import EnvConfig, load_bot_config
 from bot.exchange.bybit_client import BybitClient
 from bot.market.candles import candles_to_df
-from bot.market.pivots import (
-    extract_structure_breaks_htf,
-    opposite_structure_break_since_open_ms,
-    structure_break_since_open_ms,
-)
+from bot.market.pivots import extract_structure_breaks_htf
 from bot.notify.telegram import TelegramNotifier
 from bot.scheduler import TimeframeScheduler
 from bot.storage.models import SignalKind
@@ -447,7 +443,6 @@ class SignalBotApp:
         if active and not series:
             funnel["active_setups_waiting_no_fresh_ltf"] += len(active)
 
-        series_keys = set(series.keys())
         for setup in active:
             if setup.state != "ARMED":
                 continue
@@ -464,86 +459,64 @@ class SignalBotApp:
                         impulse_lock=True,
                     )
                     htf_breaks_cache[setup.htf] = breaks
-                opposite = opposite_structure_break_since_open_ms(
-                    breaks,
-                    htf_df,
+                decision = decide_setup_structure_transition(
+                    breaks=breaks,
+                    df=htf_df,
                     setup_direction=setup.direction,
                     since_open_ms=prepare_since_open_ms(setup),
                 )
-                if opposite is not None:
+                if decision.action == "INVALIDATE_OPPOSITE":
                     self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
                     funnel["setup_invalidated_by_opposite_structure"] += 1
                     funnel[f"setup_invalidated_by_opposite_structure_{setup.htf.lower()}"] += 1
                     continue
-                same_dir_new = structure_break_since_open_ms(
-                    breaks,
-                    htf_df,
-                    since_open_ms=prepare_since_open_ms(setup),
-                    direction=setup.direction,
-                    kinds=("BOS", "CHOCH"),
-                    strict_after=True,
-                )
-                if same_dir_new is not None:
+                if decision.action == "RESET_SAME_DIRECTION":
                     self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
                     funnel["setup_reset_by_new_structure_same_direction"] += 1
                     funnel[f"setup_reset_by_new_structure_same_direction_{setup.htf.lower()}"] += 1
                     continue
 
-            inv_tf = invalidation_tf_for_setup(
-                setup.htf,
-                setup.ltf_expected,
-                self._cfg.entry,
-                series_keys,
-            )
-            inv_df = series.get(inv_tf)
-            if inv_df is not None and not inv_df.empty:
-                inv_row = inv_df.iloc[-1]
-                if setup.direction == "LONG" and float(inv_row["low"]) <= setup.invalidation_price:
-                    self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
-                    funnel["setup_invalidated_on_tf"] += 1
-                    funnel[f"setup_invalidated_on_{inv_tf.lower()}"] += 1
-                    continue
-                if setup.direction == "SHORT" and float(inv_row["high"]) >= setup.invalidation_price:
-                    self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
-                    funnel["setup_invalidated_on_tf"] += 1
-                    funnel[f"setup_invalidated_on_{inv_tf.lower()}"] += 1
-                    continue
-
-            used_tf = finest_closed_ltf(
-                setup.ltf_expected,
-                closed_tfs=closed_tfs,
-                available=series_keys,
-            )
-            ltf_df = series.get(used_tf) if used_tf else None
-            if ltf_df is None or used_tf is None:
-                if finest_closed_ltf(setup.ltf_expected, closed_tfs=[], available=series_keys) is None:
-                    funnel["active_setup_no_matching_ltf"] += 1
-                else:
-                    funnel["active_setup_ltf_bar_not_closed"] += 1
-                continue
-            liberal_cfg = self._cfg.paper_mode.liberal
-            ok, choch = try_entry_confirm(
-                entry=self._cfg.entry,
-                ltf_df=ltf_df,
-                used_tf=used_tf,
+            inv_result = check_price_invalidation(
                 setup=setup,
+                series=series,
+                entry=self._cfg.entry,
+            )
+            if inv_result.invalidated:
+                self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
+                funnel["setup_invalidated_on_tf"] += 1
+                funnel[f"setup_invalidated_on_{inv_result.inv_tf.lower()}"] += 1
+                continue
+
+            ltf_result = resolve_ltf_confirmation(
+                setup=setup,
+                series=series,
+                closed_tfs=closed_tfs,
+                entry=self._cfg.entry,
                 pivot_swing_by_tf=self._cfg.pivots.swing_size_by_tf,
                 liberal_swing_override=(
                     liberal_cfg.ltf_swing_length_override if liberal_cfg.enabled else None
                 ),
-                is_liberal=setup.is_liberal,
                 use_close=self._cfg.pivots.bos_use_close,
             )
-            if not ok or choch is None:
-                suffix = (
-                    "directional_close"
-                    if self._cfg.entry.confirm_mode == "directional_close"
-                    else "structure"
-                )
+            if ltf_result.status == "NO_MATCHING_LTF":
+                funnel["active_setup_no_matching_ltf"] += 1
+                continue
+            if ltf_result.status == "LTF_NOT_CLOSED":
+                funnel["active_setup_ltf_bar_not_closed"] += 1
+                continue
+            if ltf_result.status == "WAITING_CONFIRM":
+                suffix = ltf_result.wait_suffix or "structure"
                 funnel[f"setup_waiting_ltf_{suffix}"] += 1
                 continue
+
+            used_tf = ltf_result.used_tf
+            ltf_df = ltf_result.ltf_df
+            row = ltf_result.row
+            choch = ltf_result.choch
+            if used_tf is None or ltf_df is None or row is None or choch is None:
+                funnel["active_setup_ltf_bar_not_closed"] += 1
+                continue
             funnel[f"entry_confirm_{choch.kind.lower()}_{used_tf.lower()}"] += 1
-            row = ltf_df.iloc[-1]
             state, event, phase_new = tick_setup(
                 setup=setup,
                 price_low=float(row["low"]),

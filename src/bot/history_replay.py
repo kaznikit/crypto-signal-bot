@@ -14,14 +14,13 @@ from bot.analyzer.continuation import (
     detect_continuation_prepare,
 )
 from bot.analyzer.entry_ltf import (
-    finest_closed_ltf,
-    invalidation_tf_for_setup,
     ltf_expected_for_htf,
     prepare_since_open_ms,
-    try_entry_confirm,
 )
 from bot.analyzer.filters import atr_percent, close_beyond_level, finalize_entry_levels
 from bot.analyzer.reversal import detect_reversal_prepare
+from bot.analyzer.setup_lifecycle import decide_setup_structure_transition
+from bot.analyzer.setup_runtime import check_price_invalidation, resolve_ltf_confirmation
 from bot.analyzer.strategy_gates import (
     evaluate_continuation_prepare_detailed,
     evaluate_continuation_prepare_liberal,
@@ -39,10 +38,7 @@ from bot.market.pivots import (
     extract_impulse_legs_confirmed,
     extract_structure_breaks_htf,
     impulse_invalidated,
-    impulse_leg_anchor_idxs,
-    opposite_structure_break_since_open_ms,
     pivot_label_for_htf_display,
-    structure_break_since_open_ms,
 )
 
 logger = logging.getLogger(__name__)
@@ -142,17 +138,6 @@ def _load_timeframes(
         replay_targets.append("continuation")
 
     return tuple(sorted(needed, key=lambda tf: TF_MS[tf])), tuple(replay_targets)
-
-
-def _armed_setup_ids(setups: list[ReplaySetup]) -> set[str]:
-    return {s.id for s in setups if s.state == "ARMED"}
-
-
-def _armed_dedup_keys(setups: list[ReplaySetup]) -> set[tuple[str, str, str, str]]:
-    """Уникальный ключ активного сетапа: symbol + type + htf + direction."""
-    return {
-        (s.symbol, s.setup_type, s.htf, s.direction) for s in setups if s.state == "ARMED"
-    }
 
 
 def _invalidate_armed_replay_setups_by_key(
@@ -1216,100 +1201,70 @@ async def run_history_replay(
                         impulse_lock=True,
                     )
                     htf_breaks_cache[setup.htf] = breaks
-                opposite = opposite_structure_break_since_open_ms(
-                    breaks,
-                    htf_df,
+                decision = decide_setup_structure_transition(
+                    breaks=breaks,
+                    df=htf_df,
                     setup_direction=setup.direction,
                     since_open_ms=prepare_since_open_ms(setup),
                 )
-                if opposite is not None:
+                if decision.action == "INVALIDATE_OPPOSITE":
                     setup.state = "INVALIDATED"
                     funnel["setup_invalidated_by_opposite_structure"] += 1
                     funnel[f"setup_invalidated_by_opposite_structure_{setup.htf.lower()}"] += 1
                     continue
-                same_dir_new = structure_break_since_open_ms(
-                    breaks,
-                    htf_df,
-                    since_open_ms=prepare_since_open_ms(setup),
-                    direction=setup.direction,
-                    kinds=("BOS", "CHOCH"),
-                    strict_after=True,
-                )
-                if same_dir_new is not None:
+                if decision.action == "RESET_SAME_DIRECTION":
                     setup.state = "INVALIDATED"
                     funnel["setup_reset_by_new_structure_same_direction"] += 1
                     funnel[f"setup_reset_by_new_structure_same_direction_{setup.htf.lower()}"] += 1
                     continue
 
-            series_keys = set(series.keys())
-            inv_tf = invalidation_tf_for_setup(
-                setup.htf,
-                setup.ltf_expected,
-                cfg.entry,
-                series_keys,
+            inv_result = check_price_invalidation(
+                setup=setup,
+                series=series,
+                entry=cfg.entry,
             )
-            inv_df = series.get(inv_tf)
-            if inv_df is not None and not inv_df.empty:
-                inv_row = inv_df.iloc[-1]
-                inv_low = float(inv_row["low"])
-                inv_high = float(inv_row["high"])
-                if setup.direction == "LONG" and inv_low <= setup.invalidation_price:
-                    setup.state = "INVALIDATED"
-                    funnel["setup_invalidated_before_entry"] += 1
-                    funnel[f"setup_invalidated_on_{inv_tf.lower()}"] += 1
-                    if events_out is not None:
-                        events_out.append(
-                            {
-                                "kind": "INVALIDATED",
-                                "setup_id": setup.id,
-                                "symbol": symbol,
-                                "setup_type": setup.setup_type,
-                                "direction": setup.direction,
-                                "htf": inv_tf,
-                                "bar_open_ms": int(inv_row["open_time"]),
-                                "origin_price": setup.invalidation_price,
-                                "ote_low": setup.ote_low,
-                                "ote_high": setup.ote_high,
-                                "invalidation_price": setup.invalidation_price,
-                                "is_liberal": setup.is_liberal,
-                            }
-                        )
-                    continue
-                if setup.direction == "SHORT" and inv_high >= setup.invalidation_price:
-                    setup.state = "INVALIDATED"
-                    funnel["setup_invalidated_before_entry"] += 1
-                    funnel[f"setup_invalidated_on_{inv_tf.lower()}"] += 1
-                    if events_out is not None:
-                        events_out.append(
-                            {
-                                "kind": "INVALIDATED",
-                                "setup_id": setup.id,
-                                "symbol": symbol,
-                                "setup_type": setup.setup_type,
-                                "direction": setup.direction,
-                                "htf": inv_tf,
-                                "bar_open_ms": int(inv_row["open_time"]),
-                                "origin_price": setup.invalidation_price,
-                                "ote_low": setup.ote_low,
-                                "ote_high": setup.ote_high,
-                                "invalidation_price": setup.invalidation_price,
-                                "is_liberal": setup.is_liberal,
-                            }
-                        )
-                    continue
+            if inv_result.invalidated:
+                setup.state = "INVALIDATED"
+                funnel["setup_invalidated_before_entry"] += 1
+                funnel[f"setup_invalidated_on_{inv_result.inv_tf.lower()}"] += 1
+                inv_row = inv_result.row
+                if events_out is not None and inv_row is not None:
+                    events_out.append(
+                        {
+                            "kind": "INVALIDATED",
+                            "setup_id": setup.id,
+                            "symbol": symbol,
+                            "setup_type": setup.setup_type,
+                            "direction": setup.direction,
+                            "htf": inv_result.inv_tf,
+                            "bar_open_ms": int(inv_row["open_time"]),
+                            "origin_price": setup.invalidation_price,
+                            "ote_low": setup.ote_low,
+                            "ote_high": setup.ote_high,
+                            "invalidation_price": setup.invalidation_price,
+                            "is_liberal": setup.is_liberal,
+                        }
+                    )
+                continue
 
-            used_tf = finest_closed_ltf(
-                setup.ltf_expected,
+            lib = cfg.paper_mode.liberal
+            ltf_result = resolve_ltf_confirmation(
+                setup=setup,
+                series=series,
                 closed_tfs=closed_now,
-                available=series_keys,
+                entry=cfg.entry,
+                pivot_swing_by_tf=cfg.pivots.swing_size_by_tf,
+                liberal_swing_override=lib.ltf_swing_length_override if lib.enabled else None,
+                use_close=cfg.pivots.bos_use_close,
             )
-            if used_tf is None:
-                continue
-            ltf_df = series.get(used_tf)
-            if ltf_df is None or ltf_df.empty:
+            if ltf_result.status in {"NO_MATCHING_LTF", "LTF_NOT_CLOSED"}:
                 continue
 
-            row = ltf_df.iloc[-1]
+            used_tf = ltf_result.used_tf
+            ltf_df = ltf_result.ltf_df
+            row = ltf_result.row
+            if used_tf is None or ltf_df is None or row is None:
+                continue
             low = float(row["low"])
             high = float(row["high"])
 
@@ -1324,24 +1279,13 @@ async def run_history_replay(
                     continue
                 setup.phase = "WAIT_CHOCH"
 
-            lib = cfg.paper_mode.liberal
-            ok, choch = try_entry_confirm(
-                entry=cfg.entry,
-                ltf_df=ltf_df,
-                used_tf=used_tf,
-                setup=setup,
-                pivot_swing_by_tf=cfg.pivots.swing_size_by_tf,
-                liberal_swing_override=lib.ltf_swing_length_override if lib.enabled else None,
-                is_liberal=setup.is_liberal,
-                use_close=cfg.pivots.bos_use_close,
-            )
-            if not ok or choch is None:
-                suffix = (
-                    "directional_close"
-                    if cfg.entry.confirm_mode == "directional_close"
-                    else "structure"
-                )
+            if ltf_result.status == "WAITING_CONFIRM":
+                suffix = ltf_result.wait_suffix or "structure"
                 funnel[f"setup_waiting_ltf_{suffix}"] += 1
+                continue
+
+            choch = ltf_result.choch
+            if choch is None:
                 continue
             funnel[f"entry_confirm_{choch.kind.lower()}_{used_tf.lower()}"] += 1
 

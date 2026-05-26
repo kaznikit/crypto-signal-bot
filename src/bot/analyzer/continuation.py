@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any
 
+from bot.analyzer.structure_state import resolve_prepare_structure_state
 from bot.analyzer.setup_machine import SetupEvent, build_setup, make_setup_id
 from bot.market.pivots import (
     continuation_anchor_break,
@@ -11,11 +11,7 @@ from bot.market.pivots import (
     extract_impulse_legs_confirmed,
     extract_structure_breaks_htf,
     filter_causal_structure_breaks,
-    find_first_touch_idx,
-    impulse_invalidated,
     latest_structure_break,
-    prepare_emission_bar_idx,
-    prepare_emission_on_current_bar,
     prepare_suppressed_after_trend_flip,
     prepare_suppressed_during_impulse_lock,
     structure_break_key,
@@ -167,79 +163,18 @@ def detect_continuation_prepare(
     if not legs:
         return None, None
 
-    impulse = None
-    trigger_level = 0.0
-    touch_idx = -1
-    for cand in legs:
-        if cand.direction != structure_direction:
-            _funnel_inc(funnel, "leg_direction_misaligned")
-            continue
-        if cand.anchor_break_idx is None:
-            _funnel_inc(funnel, "leg_has_no_anchor_break")
-            continue
-        if cand.anchor_break_idx < last_break.broken_idx:
-            _funnel_inc(funnel, "leg_not_confirmed_by_anchor_break")
-            continue
-        if last_pos - cand.end_idx > impulse_max_age_bars:
-            _funnel_inc(funnel, "leg_too_old")
-            break
-        if cand.end_idx >= last_pos:
-            _funnel_inc(funnel, "leg_peak_is_current_bar")
-            continue
-        if impulse_invalidated(
-            htf_df,
-            direction=cand.direction,
-            start_price=cand.start_price,
-            after_idx=max(
-                cand.end_idx,
-                cand.anchor_break_idx if cand.anchor_break_idx is not None else cand.end_idx,
-            ),
-        ):
-            _funnel_inc(funnel, "leg_invalidated")
-            continue
-
-        cand_trigger = cand.fib_half if fib_level == 0.5 else _fib_at(cand, fib_level)
-        since_touch = max(cand.end_idx, cand.anchor_break_idx, last_break.broken_idx)
-        touch_idx = find_first_touch_idx(
-            htf_df,
-            direction=cand.direction,
-            level=cand_trigger,
-            since_idx=since_touch,
-        )
-        if touch_idx < 0:
-            _funnel_inc(funnel, "no_touch_yet")
-            continue
-
-        emission_bar = prepare_emission_bar_idx(
-            leg_end_idx=cand.end_idx,
-            anchor_break_idx=cand.anchor_break_idx,
-            swing_size=swing_size,
-            touch_idx=touch_idx,
-        )
-        if emission_bar != last_pos:
-            if emission_bar < last_pos:
-                _funnel_inc(funnel, "emission_bar_in_past")
-            else:
-                _funnel_inc(funnel, "emission_bar_in_future")
-            continue
-
-        emission = prepare_emission_on_current_bar(
-            htf_df,
-            leg_end_idx=cand.end_idx,
-            swing_size=swing_size,
-            touch_direction=cand.direction,
-            level=cand_trigger,
-            since_idx=since_touch,
-            anchor_break_idx=cand.anchor_break_idx,
-        )
-        if emission is None:
-            continue
-        _, touch_idx = emission
-        impulse = cand
-        trigger_level = cand_trigger
-        break
-
-    if impulse is None:
+    state = resolve_prepare_structure_state(
+        df=htf_df,
+        legs=legs,
+        structure_break=last_break,
+        structure_direction=structure_direction,
+        fib_level=fib_level,
+        impulse_max_age_bars=impulse_max_age_bars,
+        swing_size=swing_size,
+        last_pos=last_pos,
+        on_reject=(lambda reason: _funnel_inc(funnel, reason)),
+    )
+    if state is None:
         return None, None
 
     leg_key = (
@@ -248,8 +183,8 @@ def detect_continuation_prepare(
         br_key[2],
         br_key[3],
         br_key[4],
-        int(impulse.start_idx),
-        int(impulse.end_idx),
+        int(state.impulse.start_idx),
+        int(state.impulse.end_idx),
     )
     if prepare_state is not None:
         if leg_key in prepare_state.prepared_leg_keys:
@@ -258,20 +193,20 @@ def detect_continuation_prepare(
         prepare_state.prepared_leg_keys.add(leg_key)
 
     setup_id = make_setup_id(symbol, setup_type, htf, close_time)
-    start_open_ms = int(htf_df.iloc[impulse.start_idx]["open_time"])
-    end_open_ms = int(htf_df.iloc[impulse.end_idx]["open_time"])
-    touch_open_ms = int(htf_df.iloc[touch_idx]["open_time"])
+    start_open_ms = int(htf_df.iloc[state.impulse.start_idx]["open_time"])
+    end_open_ms = int(htf_df.iloc[state.impulse.end_idx]["open_time"])
+    touch_open_ms = int(htf_df.iloc[state.touch_idx]["open_time"])
     setup = build_setup(
         setup_id=setup_id,
         symbol=symbol,
         setup_type=setup_type,
-        direction=impulse.direction,
+        direction=state.direction,
         htf=htf,
         ltf_expected=ltf_expected,
-        origin_price=trigger_level,
-        ote_low=trigger_level,
-        ote_high=trigger_level,
-        invalidation_price=impulse.start_price,
+        origin_price=state.level_50,
+        ote_low=state.level_50,
+        ote_high=state.level_50,
+        invalidation_price=state.impulse.start_price,
         ttl_hours=ttl_hours,
         phase="WAIT_CHOCH",
         prepare_since_ms=touch_open_ms,
@@ -282,17 +217,19 @@ def detect_continuation_prepare(
             "setup_id": setup.id,
             "symbol": symbol,
             "type": setup_type.value,
-            "direction": impulse.direction,
+            "direction": state.direction,
             "htf": htf,
-            "origin_price": trigger_level,
-            "ote_low": trigger_level,
-            "ote_high": trigger_level,
-            "prepare_trigger_level": trigger_level,
+            "origin_price": state.level_50,
+            "ote_low": state.level_50,
+            "ote_high": state.level_50,
+            "prepare_trigger_level": state.level_50,
             "prepare_trigger_fib": float(fib_level),
-            "impulse_start_price": impulse.start_price,
-            "impulse_end_price": impulse.end_price,
-            "invalidation_price": impulse.start_price,
+            "impulse_start_price": state.impulse.start_price,
+            "impulse_end_price": state.impulse.end_price,
+            "invalidation_price": state.impulse.start_price,
             "wait_for_ote_touch": False,
+            "retrace_label": state.retrace_label,
+            "retrace_price": state.retrace_price,
             "structure_kind": last_break.kind,
             "structure_level": last_break.swing_price,
             "structure_swing_open_ms": int(
@@ -304,14 +241,10 @@ def detect_continuation_prepare(
             "impulse_leg_start_open_ms": start_open_ms,
             "impulse_leg_end_open_ms": end_open_ms,
             "touch_open_ms": touch_open_ms,
-            "emission_bar_open_ms": int(htf_df.iloc[last_pos]["open_time"]),
+            "emission_bar_open_ms": int(
+                htf_df.iloc[state.emission_bar_idx]["open_time"]
+            ),
             "structure_break_key": br_key,
         },
     )
     return setup, event
-
-
-def _fib_at(impulse: Any, fib: float) -> float:
-    if impulse.direction == "LONG":
-        return impulse.end_price - fib * (impulse.end_price - impulse.start_price)
-    return impulse.end_price + fib * (impulse.start_price - impulse.end_price)
