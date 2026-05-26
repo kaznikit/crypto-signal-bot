@@ -133,10 +133,36 @@ def detect_pivots(
     # одновременно HIGH и LOW; Pine обрабатывает их независимо в одном тике.
     candidates.sort(key=lambda x: (x[0], 0 if x[1] == "HIGH" else 1))
 
+    # Нормализация «активной метки»: однотипные пивоты подряд (без пивота
+    # противоположного типа между ними) считаем переносом текущей метки, а не
+    # созданием новой. Это убирает цепочки HL→HL→HL / LH→LH→LH на плато и в
+    # мелком шуме и оставляет один активный HIGH/LOW за фазу движения.
+    collapsed: list[tuple[int, str, float]] = []
+    for idx, kind, price in candidates:
+        if not collapsed:
+            collapsed.append((idx, kind, price))
+            continue
+
+        last_idx, last_kind, last_price = collapsed[-1]
+        if kind != last_kind:
+            collapsed.append((idx, kind, price))
+            continue
+
+        if kind == "HIGH":
+            # Для HIGH переносим метку на более высокий экстремум, а при
+            # равенстве — на более поздний бар.
+            if price > last_price or (price == last_price and idx > last_idx):
+                collapsed[-1] = (idx, kind, price)
+        else:
+            # Для LOW переносим метку на более низкий экстремум, а при
+            # равенстве — на более поздний бар.
+            if price < last_price or (price == last_price and idx > last_idx):
+                collapsed[-1] = (idx, kind, price)
+
     prev_high: float | None = None
     prev_low: float | None = None
     pivots: list[Pivot] = []
-    for idx, kind, price in candidates:
+    for idx, kind, price in collapsed:
         if kind == "HIGH":
             label = "HH" if (prev_high is None or price >= prev_high) else "LH"
             prev_high = price
@@ -1783,12 +1809,44 @@ def opposite_structure_break_since_open_ms(
     запрещаем.
     """
     opposite = "SHORT" if setup_direction == "LONG" else "LONG"
+    return structure_break_since_open_ms(
+        breaks,
+        df,
+        since_open_ms=since_open_ms,
+        direction=opposite,
+        kinds=kinds,
+        strict_after=False,
+    )
+
+
+def structure_break_since_open_ms(
+    breaks: list[StructureBreak],
+    df: pd.DataFrame,
+    *,
+    since_open_ms: int,
+    direction: str | None = None,
+    kinds: tuple[str, ...] = ("BOS", "CHOCH"),
+    strict_after: bool = False,
+) -> StructureBreak | None:
+    """Последний структурный пробой после ``since_open_ms``.
+
+    ``strict_after=False`` -> ``>= since_open_ms``.
+    ``strict_after=True`` -> ``> since_open_ms``.
+
+    Если ``direction`` задан, фильтрует по направлению.
+    """
     for br in reversed(breaks):
-        if br.kind not in kinds or br.direction != opposite:
+        if br.kind not in kinds:
+            continue
+        if direction is not None and br.direction != direction:
             continue
         try:
             broken_open_ms = int(df.iloc[br.broken_idx]["open_time"])
         except (KeyError, IndexError):
+            continue
+        if strict_after:
+            if broken_open_ms > since_open_ms:
+                return br
             continue
         if broken_open_ms >= since_open_ms:
             return br

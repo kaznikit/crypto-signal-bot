@@ -29,6 +29,7 @@ from bot.market.candles import candles_to_df
 from bot.market.pivots import (
     extract_structure_breaks_htf,
     opposite_structure_break_since_open_ms,
+    structure_break_since_open_ms,
 )
 from bot.notify.telegram import TelegramNotifier
 from bot.scheduler import TimeframeScheduler
@@ -72,6 +73,25 @@ class SignalBotApp:
         self._scheduler = TimeframeScheduler()
         self._latest_4h_series: dict[str, Any] = {}
 
+    def _invalidate_active_setups_for_key(
+        self,
+        key: tuple[str, str, str, str],
+        *,
+        armed_keys: set[tuple[str, str, str, str]],
+        active_by_key: dict[tuple[str, str, str, str], list[Any]],
+    ) -> int:
+        """Сбрасывает ARMED setup'ы по dedup-ключу перед созданием нового."""
+        existing = active_by_key.get(key, [])
+        if not existing:
+            armed_keys.discard(key)
+            return 0
+        now = utcnow()
+        for setup in existing:
+            self._repo.mark_setup_state(setup.id, "INVALIDATED", now)
+        active_by_key[key] = []
+        armed_keys.discard(key)
+        return len(existing)
+
     async def run(self) -> None:
         self._scheduler.add_tick_job(self.tick)
         self._scheduler.start()
@@ -108,6 +128,12 @@ class SignalBotApp:
         armed_keys: set[tuple[str, str, str, str]] = {
             (s.symbol, s.type, s.htf, s.direction) for s in active_now if s.state == "ARMED"
         }
+        active_by_key: dict[tuple[str, str, str, str], list[Any]] = {}
+        for setup in active_now:
+            if setup.state != "ARMED":
+                continue
+            key = (setup.symbol, setup.type, setup.htf, setup.direction)
+            active_by_key.setdefault(key, []).append(setup)
 
         needed_tfs: set[str] = set()
         for setup in active_now:
@@ -140,7 +166,13 @@ class SignalBotApp:
 
         prepare_htfs = self._cfg.prepare_htfs()
         if "4H" in prepare_htfs and "4H" in series:
-            await self._try_create_reversal(symbol, series["4H"], funnel, armed_keys)
+            await self._try_create_reversal(
+                symbol,
+                series["4H"],
+                funnel,
+                armed_keys,
+                active_by_key,
+            )
         for htf in prepare_htfs:
             if htf in series:
                 await self._try_create_continuation(
@@ -150,6 +182,7 @@ class SignalBotApp:
                     df_4h_for_alignment,
                     funnel,
                     armed_keys,
+                    active_by_key,
                 )
         await self._advance_active_setups(
             symbol=symbol,
@@ -165,6 +198,7 @@ class SignalBotApp:
         df: Any,
         funnel: Counter[str],
         armed_keys: set[tuple[str, str, str, str]],
+        active_by_key: dict[tuple[str, str, str, str], list[Any]],
     ) -> None:
         liberal_cfg = self._cfg.paper_mode.liberal
         strict_lookback = self._cfg.reversal.choch_lookback_bars
@@ -207,9 +241,15 @@ class SignalBotApp:
             funnel["reversal_no_prepare_candidate"] += 1
             return
 
-        if (symbol, setup.type, "4H", setup.direction) in armed_keys:
-            funnel["reversal_active_setup_exists"] += 1
-            return
+        dedup_key = (symbol, setup.type, "4H", setup.direction)
+        if dedup_key in armed_keys:
+            replaced = self._invalidate_active_setups_for_key(
+                dedup_key,
+                armed_keys=armed_keys,
+                active_by_key=active_by_key,
+            )
+            if replaced > 0:
+                funnel["reversal_prepare_replaced_by_new_structure"] += replaced
 
         strict_gate = evaluate_reversal_prepare_detailed(
             df=df,
@@ -240,6 +280,8 @@ class SignalBotApp:
             )
             if signal_row is not None:
                 self._repo.save_signal(signal_row)
+            armed_keys.add(dedup_key)
+            active_by_key[dedup_key] = [setup]
             funnel["reversal_prepare_sent"] += 1
             return
 
@@ -273,6 +315,8 @@ class SignalBotApp:
                 )
                 if signal_row is not None:
                     self._repo.save_signal(signal_row)
+                armed_keys.add(dedup_key)
+                active_by_key[dedup_key] = [setup]
                 funnel["reversal_prepare_sent_liberal"] += 1
                 return
             funnel[f"liberal_{lib_gate.reason}"] += 1
@@ -287,6 +331,7 @@ class SignalBotApp:
         df_4h_for_alignment: Any,
         funnel: Counter[str],
         armed_keys: set[tuple[str, str, str, str]],
+        active_by_key: dict[tuple[str, str, str, str], list[Any]],
     ) -> None:
         liberal_cfg = self._cfg.paper_mode.liberal
         swing_htf = int(self._cfg.pivots.swing_size_by_tf.get(htf, 15))
@@ -307,9 +352,15 @@ class SignalBotApp:
             funnel[f"continuation_{htf.lower()}_no_prepare_candidate"] += 1
             return
 
-        if (symbol, setup.type, htf, setup.direction) in armed_keys:
-            funnel[f"continuation_{htf.lower()}_active_setup_exists"] += 1
-            return
+        dedup_key = (symbol, setup.type, htf, setup.direction)
+        if dedup_key in armed_keys:
+            replaced = self._invalidate_active_setups_for_key(
+                dedup_key,
+                armed_keys=armed_keys,
+                active_by_key=active_by_key,
+            )
+            if replaced > 0:
+                funnel[f"continuation_{htf.lower()}_prepare_replaced_by_new_structure"] += replaced
 
         strict_gate = evaluate_continuation_prepare_detailed(
             df_htf=df,
@@ -340,6 +391,8 @@ class SignalBotApp:
             )
             if signal_row is not None:
                 self._repo.save_signal(signal_row)
+            armed_keys.add(dedup_key)
+            active_by_key[dedup_key] = [setup]
             funnel[f"continuation_{htf.lower()}_prepare_sent"] += 1
             return
 
@@ -373,6 +426,8 @@ class SignalBotApp:
                 )
                 if signal_row is not None:
                     self._repo.save_signal(signal_row)
+                armed_keys.add(dedup_key)
+                active_by_key[dedup_key] = [setup]
                 funnel[f"continuation_{htf.lower()}_prepare_sent_liberal"] += 1
                 return
             funnel[f"liberal_{lib_gate.reason}"] += 1
@@ -419,6 +474,19 @@ class SignalBotApp:
                     self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
                     funnel["setup_invalidated_by_opposite_structure"] += 1
                     funnel[f"setup_invalidated_by_opposite_structure_{setup.htf.lower()}"] += 1
+                    continue
+                same_dir_new = structure_break_since_open_ms(
+                    breaks,
+                    htf_df,
+                    since_open_ms=prepare_since_open_ms(setup),
+                    direction=setup.direction,
+                    kinds=("BOS", "CHOCH"),
+                    strict_after=True,
+                )
+                if same_dir_new is not None:
+                    self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
+                    funnel["setup_reset_by_new_structure_same_direction"] += 1
+                    funnel[f"setup_reset_by_new_structure_same_direction_{setup.htf.lower()}"] += 1
                     continue
 
             inv_tf = invalidation_tf_for_setup(

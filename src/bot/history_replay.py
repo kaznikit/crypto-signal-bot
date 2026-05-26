@@ -42,6 +42,7 @@ from bot.market.pivots import (
     impulse_leg_anchor_idxs,
     opposite_structure_break_since_open_ms,
     pivot_label_for_htf_display,
+    structure_break_since_open_ms,
 )
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,31 @@ def _armed_dedup_keys(setups: list[ReplaySetup]) -> set[tuple[str, str, str, str
     return {
         (s.symbol, s.setup_type, s.htf, s.direction) for s in setups if s.state == "ARMED"
     }
+
+
+def _invalidate_armed_replay_setups_by_key(
+    setups: list[ReplaySetup],
+    *,
+    key: tuple[str, str, str, str],
+) -> int:
+    """Сбрасывает ARMED setup'ы по dedup-ключу.
+
+    Возвращает количество сброшенных setup'ов.
+    """
+    symbol, setup_type, htf, direction = key
+    invalidated = 0
+    for setup in setups:
+        if setup.state != "ARMED":
+            continue
+        if (
+            setup.symbol == symbol
+            and setup.setup_type == setup_type
+            and setup.htf == htf
+            and setup.direction == direction
+        ):
+            setup.state = "INVALIDATED"
+            invalidated += 1
+    return invalidated
 
 
 def _emit_fresh_pivot_events(
@@ -932,6 +958,14 @@ async def run_history_replay(
                 if setup_obj is None or event is None:
                     funnel["reversal_no_prepare_candidate"] += 1
                 else:
+                    dedup_key = (symbol, setup_obj.type, "4H", setup_obj.direction)
+                    replaced = _invalidate_armed_replay_setups_by_key(
+                        setups,
+                        key=dedup_key,
+                    )
+                    if replaced > 0:
+                        funnel["reversal_prepare_replaced_by_new_structure"] += replaced
+
                     gate = evaluate_reversal_prepare_detailed(
                         df=df_4h,
                         choch_direction=setup_obj.direction,
@@ -1053,6 +1087,14 @@ async def run_history_replay(
                 if setup_obj is None or event is None:
                     funnel[f"continuation_{htf.lower()}_no_prepare_candidate"] += 1
                     continue
+
+                dedup_key = (symbol, setup_obj.type, htf, setup_obj.direction)
+                replaced = _invalidate_armed_replay_setups_by_key(
+                    setups,
+                    key=dedup_key,
+                )
+                if replaced > 0:
+                    funnel[f"continuation_{htf.lower()}_prepare_replaced_by_new_structure"] += replaced
 
                 gate = evaluate_continuation_prepare_detailed(
                     df_htf=df_htf,
@@ -1184,6 +1226,19 @@ async def run_history_replay(
                     setup.state = "INVALIDATED"
                     funnel["setup_invalidated_by_opposite_structure"] += 1
                     funnel[f"setup_invalidated_by_opposite_structure_{setup.htf.lower()}"] += 1
+                    continue
+                same_dir_new = structure_break_since_open_ms(
+                    breaks,
+                    htf_df,
+                    since_open_ms=prepare_since_open_ms(setup),
+                    direction=setup.direction,
+                    kinds=("BOS", "CHOCH"),
+                    strict_after=True,
+                )
+                if same_dir_new is not None:
+                    setup.state = "INVALIDATED"
+                    funnel["setup_reset_by_new_structure_same_direction"] += 1
+                    funnel[f"setup_reset_by_new_structure_same_direction_{setup.htf.lower()}"] += 1
                     continue
 
             series_keys = set(series.keys())

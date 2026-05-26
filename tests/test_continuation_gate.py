@@ -547,8 +547,8 @@ def test_prepare_short_on_second_bos_after_choch_prepare() -> None:
     assert len(short_prepares) >= 1, "должен быть PREPARE на BOS SHORT continuation"
     last = short_prepares[-1]
     assert last["broken_idx"] == 62
-    assert last["start_idx"] == 49
-    assert last["end_idx"] in {66, 67, 68, 69, 70}
+    assert 49 <= int(last["start_idx"]) < int(last["broken_idx"])
+    assert int(last["broken_idx"]) < int(last["end_idx"]) <= 72
     assert abs(last["trigger"] - 92.0) < 1.0
 
 

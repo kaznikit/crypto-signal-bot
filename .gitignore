@@ -27,5 +27,8 @@ build/
 .coverage
 htmlcov/
 
+# Local exports
+INJ_1h_1.pine
+
 # OS
 .DS_Store

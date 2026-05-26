@@ -7,10 +7,12 @@ from bot.history_replay import (
     _dedupe_overlay_events,
     _filter_invalidated_impulses,
     _filter_stale_structure_events,
+    _invalidate_armed_replay_setups_by_key,
     _keep_single_retrace_pivot_per_leg,
     _max_drawdown_r,
     _normalize_structure_sequence,
     _resolve_trade_exit,
+    ReplaySetup,
     _summarize,
 )
 
@@ -76,6 +78,61 @@ def test_summarize_basic_metrics() -> None:
     assert summary.losses == 1
     assert summary.winrate_pct == 50.0
     assert summary.total_r == 1.0
+
+
+def test_invalidate_armed_replay_setups_by_key() -> None:
+    setups = [
+        ReplaySetup(
+            id="a",
+            symbol="BTCUSDT",
+            setup_type="CONTINUATION",
+            direction="LONG",
+            htf="1H",
+            ltf_expected="5M",
+            invalidation_price=90.0,
+            state="ARMED",
+            close_time=1,
+            expires_time=10,
+            ote_low=95.0,
+            ote_high=95.0,
+        ),
+        ReplaySetup(
+            id="b",
+            symbol="BTCUSDT",
+            setup_type="CONTINUATION",
+            direction="SHORT",
+            htf="1H",
+            ltf_expected="5M",
+            invalidation_price=110.0,
+            state="ARMED",
+            close_time=2,
+            expires_time=10,
+            ote_low=105.0,
+            ote_high=105.0,
+        ),
+        ReplaySetup(
+            id="c",
+            symbol="BTCUSDT",
+            setup_type="CONTINUATION",
+            direction="LONG",
+            htf="1H",
+            ltf_expected="5M",
+            invalidation_price=91.0,
+            state="CONFIRMED",
+            close_time=3,
+            expires_time=10,
+            ote_low=96.0,
+            ote_high=96.0,
+        ),
+    ]
+    changed = _invalidate_armed_replay_setups_by_key(
+        setups,
+        key=("BTCUSDT", "CONTINUATION", "1H", "LONG"),
+    )
+    assert changed == 1
+    assert setups[0].state == "INVALIDATED"
+    assert setups[1].state == "ARMED"
+    assert setups[2].state == "CONFIRMED"
 
 
 def test_filter_invalidated_impulses_keeps_prepare_referenced_leg() -> None:

@@ -26,6 +26,7 @@ from bot.market.pivots import (
     impulse_invalidated,
     latest_structure_break,
     opposite_structure_break_since_open_ms,
+    structure_break_since_open_ms,
     prepare_emission_on_current_bar,
 )
 
@@ -603,6 +604,45 @@ def test_opposite_structure_break_since_open_ms_filters_by_direction_and_time() 
     assert none_after is None
 
 
+def test_structure_break_since_open_ms_supports_strict_after() -> None:
+    df = _df([100.0 + i for i in range(20)], spread=0.1)
+    breaks = [
+        StructureBreak("LONG", "BOS", 2, 102.0, 4),
+        StructureBreak("SHORT", "CHOCH", 5, 99.0, 8),
+        StructureBreak("SHORT", "BOS", 9, 98.0, 12),
+        StructureBreak("LONG", "CHOCH", 13, 105.0, 15),
+    ]
+    since_12 = int(df.iloc[12]["open_time"])
+    exact_short = structure_break_since_open_ms(
+        breaks,
+        df,
+        since_open_ms=since_12,
+        direction="SHORT",
+        strict_after=False,
+    )
+    assert exact_short is not None
+    assert exact_short.broken_idx == 12
+
+    no_short_strict = structure_break_since_open_ms(
+        breaks,
+        df,
+        since_open_ms=since_12,
+        direction="SHORT",
+        strict_after=True,
+    )
+    assert no_short_strict is None
+
+    long_after = structure_break_since_open_ms(
+        breaks,
+        df,
+        since_open_ms=since_12,
+        direction="LONG",
+        strict_after=True,
+    )
+    assert long_after is not None
+    assert long_after.broken_idx == 15
+
+
 def test_extract_structure_breaks_does_not_repeat_break_at_same_level() -> None:
     """После пробоя уровня P повторный pivot на той же высоте/глубине не
     должен генерировать новый break того же направления — линию пробивают
@@ -622,4 +662,43 @@ def test_extract_structure_breaks_does_not_repeat_break_at_same_level() -> None:
     assert all(level < 100.0 - 1e-9 for level in short_break_levels[1:]), (
         "повторный пробой уровня 100 не должен фиксироваться: "
         f"breaks={short_break_levels}"
+    )
+
+
+def test_detect_pivots_has_no_consecutive_same_kind_markers() -> None:
+    """Однотипные пивоты подряд должны переносить активную метку, а не дублироваться."""
+    closes = [100.0] * 14 + [105.0] * 6 + [100.0] * 14
+    pivots = detect_pivots(_df(closes, spread=0.1), swing_size=3)
+    assert pivots, "ожидаем хотя бы один пивот"
+    assert all(
+        prev.kind != cur.kind for prev, cur in zip(pivots, pivots[1:], strict=False)
+    ), f"найдены дублирующиеся однотипные пивоты: {[(p.idx, p.kind, p.price) for p in pivots]}"
+
+
+def test_detect_pivots_htf_keeps_single_retrace_marker_between_long_breaks() -> None:
+    """Между двумя LONG BOS/CHOCH должен быть один активный LOW-ретрейс."""
+    closes = (
+        [100.0] * 10
+        + [102.0, 104.0, 106.0, 108.0, 110.0, 112.0, 114.0, 116.0, 118.0, 120.0]
+        + [120.0] * 5
+        + [118.0, 116.0, 114.0, 112.0, 110.0, 111.0, 109.0, 110.0, 108.0, 109.0, 107.0]
+        + [108.0, 106.0, 107.0, 106.0, 108.0, 112.0, 116.0, 121.0]
+    )
+    df = _df(closes, spread=0.2)
+    breaks = pivmod.extract_structure_breaks_htf(
+        df, swing_size=3, use_close=True, impulse_lock=True
+    )
+    long_breaks = [b for b in breaks if b.direction == "LONG"]
+    assert len(long_breaks) >= 2, f"нужны 2 LONG break, получили {long_breaks}"
+    first_br, second_br = long_breaks[0], long_breaks[1]
+
+    pivots = pivmod.detect_pivots_htf(df, swing_size=3, use_close=True, impulse_lock=True)
+    retrace_lows = [
+        p
+        for p in pivots
+        if p.kind == "LOW" and first_br.broken_idx < p.idx < second_br.broken_idx
+    ]
+    assert len(retrace_lows) == 1, (
+        "между двумя LONG break должна оставаться одна активная LOW-метка "
+        f"(получили: {[(p.idx, p.label, p.price) for p in retrace_lows]})"
     )
