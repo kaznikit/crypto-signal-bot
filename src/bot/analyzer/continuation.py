@@ -189,7 +189,10 @@ def detect_continuation_prepare(
             htf_df,
             direction=cand.direction,
             start_price=cand.start_price,
-            after_idx=cand.end_idx,
+            after_idx=max(
+                cand.end_idx,
+                cand.anchor_break_idx if cand.anchor_break_idx is not None else cand.end_idx,
+            ),
         ):
             _funnel_inc(funnel, "leg_invalidated")
             continue

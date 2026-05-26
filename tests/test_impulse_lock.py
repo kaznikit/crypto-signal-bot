@@ -22,7 +22,9 @@ from bot.market.pivots import (
     impulse_leg_for_retracement_pivot,
     pivot_label_for_htf_display,
     apply_impulse_invalidation_choch,
+    _build_leg_from_break,
     prepare_suppressed_during_impulse_lock,
+    reanchor_choch_to_structural_swing,
     reclassify_structure_break_kinds,
 )
 
@@ -1059,3 +1061,93 @@ def test_filter_pivots_keeps_anchors_plus_one_retrace() -> None:
     filtered = filter_pivots_by_impulse_lock(pivots, lock, impulse_legs=legs)
     assert len(filtered) == 3
     assert {p.idx for p in filtered} == {0, 10, 20}
+
+
+def test_choch_long_leg_end_not_capped_by_next_bos_swing() -> None:
+    """End CHOCH-ноги = HH после flip, а не swing_idx следующего BOS."""
+    swing = 2
+    pivots = [
+        Pivot(idx=5, kind="LOW", price=4.0, label="HL"),
+        Pivot(idx=10, kind="HIGH", price=4.24, label="LH"),
+        Pivot(idx=20, kind="LOW", price=4.08, label="HL"),
+        Pivot(idx=30, kind="HIGH", price=4.40, label="HH"),
+    ]
+    breaks = [
+        StructureBreak("SHORT", "CHOCH", swing_idx=5, swing_price=4.0, broken_idx=15),
+        StructureBreak("LONG", "CHOCH", swing_idx=10, swing_price=4.24, broken_idx=25),
+        StructureBreak("LONG", "BOS", swing_idx=30, swing_price=4.40, broken_idx=40),
+    ]
+    legs = extract_impulse_legs_confirmed(pivots, breaks, swing_size=swing)
+    choch_legs = [leg for leg in legs if leg.direction == "LONG" and leg.anchor_break_idx == 25]
+    assert choch_legs
+    assert choch_legs[-1].end_idx == 30
+    assert choch_legs[-1].end_price == 4.40
+
+
+def test_reanchor_drops_probe_choch_on_internal_hl() -> None:
+    """Пробой internal HL без close ниже структурного HL не даёт CHOCH."""
+    import pandas as pd
+
+    pivots = [
+        Pivot(idx=5, kind="LOW", price=4.90, label="HL"),
+        Pivot(idx=10, kind="LOW", price=5.04, label="HL"),
+    ]
+    rows = []
+    for i, close in enumerate([5.10, 5.08, 5.06, 5.05, 5.04, 5.03, 5.02, 5.01, 5.00, 4.99, 4.98, 4.97, 4.96, 4.95, 4.96, 4.94, 4.93, 4.92, 4.91, 4.88]):
+        rows.append(
+            {
+                "open_time": i * 3_600_000,
+                "open": close,
+                "high": close + 0.02,
+                "low": close - 0.02,
+                "close": close,
+                "volume": 1.0,
+            }
+        )
+    df = pd.DataFrame(rows)
+    probe_breaks = reclassify_structure_break_kinds(
+        [
+            StructureBreak("LONG", "BOS", swing_idx=0, swing_price=5.0, broken_idx=3),
+            StructureBreak("SHORT", "CHOCH", swing_idx=10, swing_price=5.04, broken_idx=15),
+        ]
+    )
+    reanchored_probe = reanchor_choch_to_structural_swing(
+        probe_breaks, pivots, df, use_close=True
+    )
+    assert not [b for b in reanchored_probe if b.broken_idx == 15]
+
+    final_breaks = reclassify_structure_break_kinds(
+        [
+            StructureBreak("LONG", "BOS", swing_idx=0, swing_price=5.0, broken_idx=3),
+            StructureBreak("SHORT", "CHOCH", swing_idx=10, swing_price=5.04, broken_idx=19),
+        ]
+    )
+    reanchored_final = reanchor_choch_to_structural_swing(
+        final_breaks, pivots, df, use_close=True
+    )
+    short_final = [b for b in reanchored_final if b.direction == "SHORT" and b.broken_idx == 19]
+    assert short_final
+    assert short_final[0].kind == "CHOCH"
+    assert short_final[0].swing_price == 5.04
+
+
+def test_choch_long_start_includes_pivot_at_opposite_break_bar() -> None:
+    """Структурный start CHOCH LONG включает LOW на баре последнего SHORT break."""
+    pivots = [
+        Pivot(idx=20, kind="LOW", price=4.10, label="LL"),
+        Pivot(idx=26, kind="LOW", price=4.087, label="LL"),
+        Pivot(idx=30, kind="HIGH", price=4.24, label="LH"),
+        Pivot(idx=39, kind="HIGH", price=4.396, label="HH"),
+    ]
+    br = StructureBreak("LONG", "CHOCH", swing_idx=30, swing_price=4.24, broken_idx=36)
+    leg = _build_leg_from_break(
+        pivots,
+        br,
+        min_idx=10,
+        previous_opposite_broken_idx=26,
+        next_same_dir_break_idx=None,
+    )
+    assert leg is not None
+    assert leg.start_idx == 26
+    assert leg.start_price == 4.087
+    assert leg.end_idx == 39

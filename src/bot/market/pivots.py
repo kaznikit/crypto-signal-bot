@@ -407,7 +407,7 @@ def _build_leg_from_break(
             pivots,
             direction=br.direction,
             before_idx=end_pivot.idx,
-            after_idx=previous_opposite_broken_idx,
+            after_idx=previous_opposite_broken_idx - 1,
         )
     if start_pivot is None:
         start_pivot = _last_pivot_before(
@@ -485,17 +485,20 @@ def extract_impulse_legs_confirmed(
     last_broken_idx_by_dir: dict[str, int] = {"LONG": -1, "SHORT": -1}
     seen: set[tuple[int, int, str, int]] = set()
 
-    # Граница «после-broken_idx» поиска: swing_idx следующего одноимённого
-    # break — этот pivot принадлежит уже следующей ноге, заходить за него
-    # нельзя, иначе ноги двух соседних BOS получат одинаковый end.
-    next_same_dir_swing_idx_by_pos: list[int | None] = [None] * len(sorted_breaks)
+    # Граница «после-broken_idx» поиска end для текущего break:
+    # - после CHOCH swing следующего BOS — это end текущей ноги → cap = broken_idx;
+    # - после BOS swing следующего BOS — уровень, который ещё не end → cap = swing_idx.
+    next_same_dir_break_idx_by_pos: list[int | None] = [None] * len(sorted_breaks)
     for i, br in enumerate(sorted_breaks):
         if br.kind not in ("BOS", "CHOCH"):
             continue
         for j in range(i + 1, len(sorted_breaks)):
             nxt = sorted_breaks[j]
             if nxt.kind in ("BOS", "CHOCH") and nxt.direction == br.direction:
-                next_same_dir_swing_idx_by_pos[i] = nxt.swing_idx
+                if br.kind == "CHOCH":
+                    next_same_dir_break_idx_by_pos[i] = nxt.broken_idx
+                else:
+                    next_same_dir_break_idx_by_pos[i] = nxt.swing_idx
                 break
 
     for i, br in enumerate(sorted_breaks):
@@ -508,7 +511,7 @@ def extract_impulse_legs_confirmed(
             pivots,
             br,
             min_idx=min_idx,
-            next_same_dir_break_idx=next_same_dir_swing_idx_by_pos[i],
+            next_same_dir_break_idx=next_same_dir_break_idx_by_pos[i],
             min_end_idx=last_end_idx_by_dir.get(br.direction, -1),
             previous_opposite_broken_idx=last_broken_idx_by_dir.get(opposite, -1),
         )
@@ -924,6 +927,13 @@ def pivot_label_for_htf_display(
             return pivot.label
         if state.leg.direction == "SHORT" and pivot.kind == "HIGH" and pivot.idx >= state.broken_start_idx:
             return pivot.label
+    # В lock-фазе ретрейса (HL/LH импульса ещё не пробит) LOW/HIGH не могут
+    # стать LL/HH — иначе на overlay появляется LL до CHOCH (INJUSDT 1H 15.05.26).
+    if state.broken_start_idx < 0 and pivot.idx > state.leg.end_idx:
+        if state.leg.direction == "LONG" and pivot.kind == "LOW":
+            return "HL"
+        if state.leg.direction == "SHORT" and pivot.kind == "HIGH":
+            return "LH"
     legs = impulse_legs or []
     ref = impulse_leg_for_retracement_pivot(pivot, legs) or state.leg
     if ref.direction == "LONG" and pivot.kind == "LOW" and pivot.price >= ref.start_price:
@@ -1195,6 +1205,66 @@ def reclassify_structure_break_kinds(
     return out
 
 
+def reanchor_choch_to_structural_swing(
+    breaks: list[StructureBreak],
+    pivots: list[Pivot],
+    df: pd.DataFrame,
+    *,
+    use_close: bool = True,
+) -> list[StructureBreak]:
+    """Отбрасывает CHOCH по internal HL/LH без пробоя структурного swing.
+
+    Если swing CHOCH выше (SHORT) / ниже (LONG) структурного экстремума
+    сегмента, flip засчитывается только при close ниже/выше структурного
+    уровня. Сохранённые CHOCH не меняют swing — это важно для collapsed
+    probe+confirm (см. INJUSDT 1H 15.05.26).
+    """
+    if not breaks or df.empty:
+        return breaks
+    src_hi = df["close"].to_numpy() if use_close else df["high"].to_numpy()
+    src_lo = df["close"].to_numpy() if use_close else df["low"].to_numpy()
+    out: list[StructureBreak] = []
+    for br_pos, br in enumerate(breaks):
+        if br.kind != "CHOCH":
+            out.append(br)
+            continue
+        last_opposite_broken = -1
+        for prev in reversed(breaks[:br_pos]):
+            if prev.direction != br.direction:
+                last_opposite_broken = prev.broken_idx
+                break
+        if br.direction == "SHORT":
+            candidates = [
+                p
+                for p in pivots
+                if p.kind == "LOW" and last_opposite_broken < p.idx < br.broken_idx
+            ]
+            if candidates:
+                structural = min(candidates, key=lambda p: (p.price, p.idx))
+                if (
+                    structural.price < br.swing_price - 1e-12
+                    and float(src_lo[br.broken_idx]) < br.swing_price
+                    and float(src_lo[br.broken_idx]) >= structural.price
+                ):
+                    continue
+        else:
+            candidates = [
+                p
+                for p in pivots
+                if p.kind == "HIGH" and last_opposite_broken < p.idx < br.broken_idx
+            ]
+            if candidates:
+                structural = max(candidates, key=lambda p: (p.price, -p.idx))
+                if (
+                    structural.price > br.swing_price + 1e-12
+                    and float(src_hi[br.broken_idx]) > br.swing_price
+                    and float(src_hi[br.broken_idx]) <= structural.price
+                ):
+                    continue
+        out.append(br)
+    return out
+
+
 def collapse_early_trend_flip_probe(
     breaks: list[StructureBreak],
     *,
@@ -1428,6 +1498,11 @@ def extract_structure_breaks_htf(
         )
         if len(collapsed_local) != len(reclassified_local):
             reclassified_local = reclassify_structure_break_kinds(collapsed_local)
+        else:
+            reclassified_local = collapsed_local
+        reclassified_local = reanchor_choch_to_structural_swing(
+            reclassified_local, pivots, df, use_close=use_close
+        )
         inv_local = impulse_invalidation_structure_break(state_local)
         if inv_local is None:
             return reclassified_local
