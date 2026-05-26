@@ -1,10 +1,10 @@
-"""
-Прогон «на истории»: walk-forward по закрытым барам 4H.
-На каждом баре смотрим, появилось ли НА этом баре новое CHoCH событие
-(Pine-style — пересечение активного prevHigh/Low close'ом), и сколько из них
-прошли те же гейты, что у живого бота для PREPARE-разворота.
+"""Walk-forward HTF probe для reversal-ветки (4H).
 
-Запуск из каталога crypto-signal-bot:
+Скрипт измеряет только верхнюю часть пайплайна: ``STRUCTURE -> PREPARE``.
+Стадии ``runtime -> ENTRY -> TP/SL`` здесь не симулируются
+(для этого используйте ``bot.history_replay``).
+
+Запуск из каталога проекта:
   python -m bot.history_backtest --symbol BTCUSDT --limit 500
 
 Нужен сетевой доступ к Bybit (публичные klines, ключи не обязательны).
@@ -17,14 +17,14 @@ import asyncio
 import logging
 from pathlib import Path
 
-from bot.analyzer.filters import atr_percent
 from bot.analyzer.entry_ltf import ltf_expected_for_htf
+from bot.analyzer.filters import atr_percent
 from bot.analyzer.reversal import detect_reversal_prepare
 from bot.analyzer.strategy_gates import evaluate_reversal_prepare
 from bot.config import EnvConfig, load_bot_config
 from bot.exchange.bybit_client import BybitClient
 from bot.market.candles import candles_to_df
-from bot.market.pivots import extract_structure_breaks
+from bot.market.pivots import extract_structure_breaks_htf
 
 logger = logging.getLogger(__name__)
 
@@ -68,14 +68,19 @@ async def run_reversal_probe(
         raise SystemExit("Пустые свечи")
 
     min_bars = max(swing_size * 3, 150)
-    new_choch = 0
-    passed_atr = 0
-    prepare_raw = 0
-    prepare_after_gates = 0
+    structure_flips = 0
+    prefilter_passed = 0
+    prepare_candidates = 0
+    prepare_gate_passed = 0
     fired_samples: list[str] = []
 
     def _count_chochs(df_slice) -> int:
-        breaks = extract_structure_breaks(df_slice, swing_size=swing_size, use_close=bos_use_close)
+        breaks = extract_structure_breaks_htf(
+            df_slice,
+            swing_size=swing_size,
+            use_close=bos_use_close,
+            impulse_lock=True,
+        )
         return sum(1 for b in breaks if b.kind == "CHOCH")
 
     prev_choch_count = _count_chochs(df.iloc[:min_bars])
@@ -87,11 +92,11 @@ async def run_reversal_probe(
         prev_choch_count = cur_choch_count
         if not is_new_event:
             continue
-        new_choch += 1
+        structure_flips += 1
 
         if atr_percent(sub) < cfg.filters.min_atr_pct:
             continue
-        passed_atr += 1
+        prefilter_passed += 1
         close_time = int(sub.iloc[-1]["open_time"])
         ttl_hours = cfg.reversal.ttl_bars_4h * 4
         setup, event = detect_reversal_prepare(
@@ -107,7 +112,7 @@ async def run_reversal_probe(
         )
         if setup is None or event is None:
             continue
-        prepare_raw += 1
+        prepare_candidates += 1
         ok, score = evaluate_reversal_prepare(
             df=sub,
             choch_direction=setup.direction,
@@ -116,24 +121,24 @@ async def run_reversal_probe(
             features=cfg.strategy_features,
         )
         if ok:
-            prepare_after_gates += 1
+            prepare_gate_passed += 1
             fired_samples.append(
                 f"#{i} bar_open={int(sub.iloc[-1]['open_time'])} dir={setup.direction} "
                 f"level={event.payload.get('prepare_trigger_level'):.4f} score={score}"
             )
 
-    print("=== Reversal 4H walk-forward (probe) ===")
+    print("=== Reversal 4H HTF Probe (STRUCTURE -> PREPARE) ===")
     print(f"Symbol: {symbol}, bars: {len(df)}, swing_size: {swing_size}")
-    print(f"1) New CHoCH events (fresh structural flips): {new_choch}")
-    print(f"2) Passed ATR + fresh-CHoCH window: {passed_atr}")
-    print(f"3) PREPARE candidates (impulse + OTE built): {prepare_raw}")
-    print(f"4) PREPARE after strategy_features gates:  {prepare_after_gates}")
+    print(f"1) STRUCTURE flips (new CHOCH on 4H): {structure_flips}")
+    print(f"2) STRUCTURE prefilter passed (ATR + fresh CHOCH window): {prefilter_passed}")
+    print(f"3) PREPARE candidates (detect_reversal_prepare): {prepare_candidates}")
+    print(f"4) PREPARE gate-passed (strategy_features): {prepare_gate_passed}")
     if fired_samples:
         print("\nПримеры (макс. 10):")
         for line in fired_samples[:10]:
             print(f"  {line}")
     print(f"\nTradingView chart: {_tv_link(symbol, '4H')}")
-    print("(ENTRY / FSM здесь не симулируются — только верхняя воронка PREPARE.)")
+    print("Дальнейшие стадии runtime/ENTRY/TP-SL: python -m bot.history_replay --mode reversal")
 
 
 def main() -> None:
@@ -152,7 +157,10 @@ def main() -> None:
         "--max-bars-ago",
         type=int,
         default=None,
-        help="Макс. баров назад для CHoCH (по умолчанию reversal.choch_lookback_bars из config.yaml)",
+        help=(
+            "Макс. баров назад для CHoCH "
+            "(по умолчанию reversal.choch_lookback_bars из config.yaml)"
+        ),
     )
     args = parser.parse_args()
     config_path = _find_config_path()
