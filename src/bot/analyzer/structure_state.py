@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import pandas as pd
 
@@ -75,9 +75,13 @@ def resolve_prepare_structure_state(
                 on_reject("leg_has_no_anchor_break")
             continue
         if cand.anchor_break_idx < structure_break.broken_idx:
-            if on_reject is not None:
-                on_reject("leg_not_confirmed_by_anchor_break")
-            continue
+            # Разрешаем ногу, если её end уже стал swing'ом текущего break.
+            # Это покрывает continuation-кейс: новый BOS появляется позже, чем
+            # anchor ноги, но сама нога подтверждена текущим swing-пробоем.
+            if cand.end_idx < structure_break.swing_idx:
+                if on_reject is not None:
+                    on_reject("leg_not_confirmed_by_anchor_break")
+                continue
         if last_pos - cand.end_idx > impulse_max_age_bars:
             if on_reject is not None:
                 on_reject("leg_too_old")

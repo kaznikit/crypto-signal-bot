@@ -3,6 +3,7 @@ import pandas as pd
 from bot.history_replay import (
     ClosedTrade,
     OpenTrade,
+    _collapse_impulse_fanout_by_start,
     _emit_fresh_pivot_events,
     _dedupe_overlay_events,
     _filter_invalidated_impulses,
@@ -579,10 +580,11 @@ def test_keep_single_retrace_pivot_before_first_structure_keeps_first_hl() -> No
     _keep_single_retrace_pivot_per_leg(events)
     pivots = [e for e in events if e.get("kind") == "PIVOT"]
     assert any(int(p["bar_open_ms"]) == 1000 for p in pivots)
-    assert not any(int(p["bar_open_ms"]) == 3000 for p in pivots)
+    # Pivot, на который опирается первое STRUCTURE-событие, должен остаться.
+    assert any(int(p["bar_open_ms"]) == 3000 for p in pivots)
 
 
-def test_keep_single_retrace_anchor_drops_duplicate_hl_in_same_segment() -> None:
+def test_keep_single_retrace_anchor_keeps_structure_swing_even_with_duplicate_hl() -> None:
     events = [
         {"kind": "STRUCTURE", "symbol": "INJUSDT", "htf": "1H", "bar_open_ms": 1000, "subkind": "BOS", "direction": "LONG", "level": 10.0, "swing_open_ms": 900},
         {"kind": "PIVOT", "symbol": "INJUSDT", "htf": "1H", "bar_open_ms": 2000, "label": "HL", "pivot_kind": "LOW", "price": 9.0},
@@ -592,4 +594,92 @@ def test_keep_single_retrace_anchor_drops_duplicate_hl_in_same_segment() -> None
     _keep_single_retrace_pivot_per_leg(events)
     piv_ms = [int(e["bar_open_ms"]) for e in events if e.get("kind") == "PIVOT"]
     assert 2000 in piv_ms
-    assert 3000 not in piv_ms
+    # Swing-anchor STRUCTURE должен оставаться, даже если label дублируется.
+    assert 3000 in piv_ms
+
+
+def test_collapse_impulse_fanout_by_start_prefers_prepare_referenced_leg() -> None:
+    events = [
+        {
+            "kind": "IMPULSE",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "direction": "LONG",
+            "start_open_ms": 1000,
+            "end_open_ms": 2000,
+        },
+        {
+            "kind": "IMPULSE",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "direction": "LONG",
+            "start_open_ms": 1000,
+            "end_open_ms": 3000,
+        },
+        {
+            "kind": "PREPARE",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "direction": "LONG",
+            "impulse_leg_start_open_ms": 1000,
+            "impulse_leg_end_open_ms": 2000,
+        },
+    ]
+    _collapse_impulse_fanout_by_start(events)
+    impulses = [e for e in events if e.get("kind") == "IMPULSE"]
+    assert len(impulses) == 1
+    assert int(impulses[0]["end_open_ms"]) == 2000
+
+
+def test_keep_single_retrace_preserves_prepare_leg_end_pivot_without_impulse_anchor() -> None:
+    events = [
+        {
+            "kind": "PIVOT",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "bar_open_ms": 1000,
+            "label": "HL",
+            "pivot_kind": "LOW",
+            "price": 3.7,
+        },
+        {
+            "kind": "PIVOT",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "bar_open_ms": 2000,
+            "label": "HH",
+            "pivot_kind": "HIGH",
+            "price": 3.9,
+        },
+        {
+            "kind": "PIVOT",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "bar_open_ms": 3000,
+            "label": "HH",
+            "pivot_kind": "HIGH",
+            "price": 4.0,
+        },
+        {
+            "kind": "STRUCTURE",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "bar_open_ms": 4000,
+            "subkind": "BOS",
+            "direction": "LONG",
+            "level": 3.9,
+            "swing_open_ms": 2000,
+        },
+        {
+            "kind": "PREPARE",
+            "symbol": "INJUSDT",
+            "htf": "1H",
+            "direction": "LONG",
+            "bar_open_ms": 4500,
+            "impulse_leg_start_open_ms": 1000,
+            "impulse_leg_end_open_ms": 3000,
+        },
+    ]
+    _keep_single_retrace_pivot_per_leg(events)
+    piv_ms = [int(e["bar_open_ms"]) for e in events if e.get("kind") == "PIVOT"]
+    assert 3000 in piv_ms

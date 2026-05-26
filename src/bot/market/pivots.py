@@ -573,6 +573,19 @@ def _build_leg_from_break(
             kind=start_kind,
             label=preferred_start_label,
         )
+    if start_pivot is None and min_idx >= 0 and previous_opposite_broken_idx >= 0:
+        # Если после предыдущего same-direction break ещё не сформировался
+        # новый HL/LH, не «глушим» ногу полностью: берём ближайший подтверждённый
+        # корректирующий pivot до ``end``. Это нужно для последовательных BOS,
+        # где PREPARE должен строиться от актуального retrace, даже если новый
+        # HL/LH подтвердится позже.
+        start_pivot = _last_pivot_before(
+            pivots,
+            before_idx=end_pivot.idx,
+            min_idx=-1,
+            kind=start_kind,
+            label=preferred_start_label,
+        )
     if start_pivot is None and min_idx < 0:
         start_pivot = _last_pivot_before(
             pivots, before_idx=end_pivot.idx, min_idx=min_idx, kind=start_kind

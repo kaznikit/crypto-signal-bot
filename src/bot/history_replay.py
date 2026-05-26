@@ -586,6 +586,14 @@ def _keep_single_retrace_pivot_per_leg(
                 anchors.add(start_ms)
             if end_ms > 0:
                 anchors.add(end_ms)
+        elif kind == "PREPARE":
+            anchors = impulse_anchor_by_tf.setdefault(tf, set())
+            start_ms = int(ev.get("impulse_leg_start_open_ms") or 0)
+            end_ms = int(ev.get("impulse_leg_end_open_ms") or 0)
+            if start_ms > 0:
+                anchors.add(start_ms)
+            if end_ms > 0:
+                anchors.add(end_ms)
 
     keep_pivot_idx: set[int] = set()
     for tf, pivots in piv_by_tf.items():
@@ -604,10 +612,15 @@ def _keep_single_retrace_pivot_per_leg(
             continue
 
         first_struct_ms = int(structures[0].get("bar_open_ms") or 0)
-        struct_times = [int(st.get("bar_open_ms") or 0) for st in structures]
         first_before_struct_by_label: dict[tuple[str, str], int] = {}
         for i, ev in pivots:
             p_ms = int(ev.get("bar_open_ms") or 0)
+            if p_ms in anchor_pivot_ms:
+                # Swing-anchors (для STRUCTURE/IMPULSE) всегда сохраняем:
+                # даже при дубле label в сегменте иначе пропадает ключевая
+                # HH/HL/LH/LL-метка, к которой привязана структура.
+                keep_pivot_idx.add(i)
+                continue
             if p_ms <= first_struct_ms:
                 lbl = str(ev.get("label") or "")
                 p_kind = str(ev.get("pivot_kind") or "")
@@ -619,23 +632,6 @@ def _keep_single_retrace_pivot_per_leg(
                     ex_ms = int(events[existing_idx].get("bar_open_ms") or 0)
                     if p_ms < ex_ms:
                         first_before_struct_by_label[key] = i
-            elif p_ms in anchor_pivot_ms:
-                lbl = str(ev.get("label") or "")
-                p_kind = str(ev.get("pivot_kind") or "")
-                prev_struct_ms = -1
-                for t in struct_times:
-                    if t >= p_ms:
-                        break
-                    prev_struct_ms = t
-                has_same_before = any(
-                    int(prev_ev.get("bar_open_ms") or 0) < p_ms
-                    and int(prev_ev.get("bar_open_ms") or 0) > prev_struct_ms
-                    and str(prev_ev.get("label") or "") == lbl
-                    and str(prev_ev.get("pivot_kind") or "") == p_kind
-                    for _, prev_ev in pivots
-                )
-                if not has_same_before:
-                    keep_pivot_idx.add(i)
         keep_pivot_idx.update(first_before_struct_by_label.values())
 
         for idx, st in enumerate(structures):
@@ -674,6 +670,60 @@ def _keep_single_retrace_pivot_per_leg(
     out: list[dict[str, Any]] = []
     for i, ev in enumerate(events):
         if ev.get("kind") != "PIVOT" or i in keep_pivot_idx:
+            out.append(ev)
+    events[:] = out
+
+
+def _collapse_impulse_fanout_by_start(events: list[dict[str, Any]]) -> None:
+    """Оставляет один IMPULSE на стартовую точку (start_open_ms) в сегменте.
+
+    В replay при последовательных BOS одна и та же стартовая HL/LH-точка может
+    порождать несколько импульсов с разными end_open_ms. На overlay это
+    выглядит как «веер» линий из одного бара.
+
+    Правило выбора:
+    - если среди кандидатов есть импульс, использованный в PREPARE, он
+      приоритетнее;
+    - внутри приоритета берём самый свежий end_open_ms.
+    """
+    prepare_refs: set[tuple[str, int, int, str]] = set()
+    for ev in events:
+        if str(ev.get("kind") or "") != "PREPARE":
+            continue
+        htf = str(ev.get("htf") or "")
+        direction = str(ev.get("direction") or "")
+        start_ms = int(ev.get("impulse_leg_start_open_ms") or 0)
+        end_ms = int(ev.get("impulse_leg_end_open_ms") or 0)
+        if not htf or direction not in {"LONG", "SHORT"} or start_ms <= 0 or end_ms <= 0:
+            continue
+        prepare_refs.add((htf, start_ms, end_ms, direction))
+
+    best_idx_by_group: dict[tuple[str, str, str, int], int] = {}
+    best_score_by_group: dict[tuple[str, str, str, int], tuple[int, int]] = {}
+    for i, ev in enumerate(events):
+        if str(ev.get("kind") or "") != "IMPULSE":
+            continue
+        symbol = str(ev.get("symbol") or "")
+        htf = str(ev.get("htf") or "")
+        direction = str(ev.get("direction") or "")
+        start_ms = int(ev.get("start_open_ms") or 0)
+        end_ms = int(ev.get("end_open_ms") or 0)
+        if not symbol or not htf or direction not in {"LONG", "SHORT"}:
+            continue
+        if start_ms <= 0 or end_ms <= 0:
+            continue
+        group = (symbol, htf, direction, start_ms)
+        is_prepare_ref = 1 if (htf, start_ms, end_ms, direction) in prepare_refs else 0
+        score = (is_prepare_ref, end_ms)
+        prev = best_score_by_group.get(group)
+        if prev is None or score > prev:
+            best_score_by_group[group] = score
+            best_idx_by_group[group] = i
+
+    keep_impulse_idx = set(best_idx_by_group.values())
+    out: list[dict[str, Any]] = []
+    for i, ev in enumerate(events):
+        if str(ev.get("kind") or "") != "IMPULSE" or i in keep_impulse_idx:
             out.append(ev)
     events[:] = out
 
@@ -1426,6 +1476,7 @@ async def run_history_replay(
         _filter_stale_structure_events(events_out, dfs, cfg)
         _normalize_structure_sequence(events_out)
         _filter_invalidated_impulses(events_out, dfs)
+        _collapse_impulse_fanout_by_start(events_out)
         _keep_single_retrace_pivot_per_leg(events_out, dfs, cfg)
 
     summary = _summarize(symbol=symbol, mode=mode, closed_trades=closed_trades)
