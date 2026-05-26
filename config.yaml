@@ -23,7 +23,7 @@ pivots:
 entry:
   ltf_by_htf:
     "4H": "5M"
-    "1H": "5M|15M"
+    "1H": "5M"
     "15M": "5M"
   invalidation_ltf_by_htf:
     "4H": "4H"

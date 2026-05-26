@@ -527,9 +527,19 @@ def _build_leg_from_break(
     if end_pivot is None and df is not None:
         end_pivot = _end_pivot_from_break_bar(df, br, after_end_idx=after_end_idx)
     if df is not None:
-        if br.kind == "CHOCH" and (
-            end_pivot is None or end_pivot.idx <= br.swing_idx
-        ):
+        if br.kind == "CHOCH":
+            choch_end_invalid = (
+                end_pivot is None
+                or end_pivot.idx <= br.swing_idx
+                or (
+                    br.direction == "LONG"
+                    and end_pivot.price <= br.swing_price
+                )
+                or (
+                    br.direction == "SHORT"
+                    and end_pivot.price >= br.swing_price
+                )
+            )
             df_peak = _end_peak_from_df_after_break(
                 df,
                 br,
@@ -537,7 +547,16 @@ def _build_leg_from_break(
                 min_bar_idx=max(min_end_idx, br.broken_idx),
             )
             if df_peak is not None:
-                end_pivot = df_peak
+                if choch_end_invalid:
+                    end_pivot = df_peak
+                elif (
+                    br.direction == "LONG"
+                    and df_peak.price > end_pivot.price
+                ) or (
+                    br.direction == "SHORT"
+                    and df_peak.price < end_pivot.price
+                ):
+                    end_pivot = df_peak
         elif br.kind == "BOS" and end_pivot is not None and end_pivot.idx < br.broken_idx:
             break_bar = _end_pivot_from_break_bar(df, br, after_end_idx=after_end_idx)
             if break_bar is not None and (
