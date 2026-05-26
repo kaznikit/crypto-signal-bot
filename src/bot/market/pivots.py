@@ -306,6 +306,98 @@ def _structural_start_pivot(
     return min(candidates, key=lambda p: (p.price, p.idx))
 
 
+def _end_pivot_from_break_bar(
+    df: pd.DataFrame,
+    br: StructureBreak,
+    *,
+    after_end_idx: int,
+) -> Pivot | None:
+    """End BOS-ноги на баре пробоя, если wick уже сделал новый HH/LL.
+
+    Pivot подтверждается через ``swing_size`` баров позже, но для continuation
+    PREPARE нужна нога сразу (см. INJUSDT 1H 11.05.26 14:00 — HH на баре BOS).
+    """
+    if br.broken_idx <= after_end_idx or br.broken_idx >= len(df):
+        return None
+    if br.direction == "LONG":
+        price = float(df.iloc[br.broken_idx]["high"])
+        if price <= br.swing_price:
+            return None
+        return Pivot(idx=br.broken_idx, kind="HIGH", price=price, label="HH")
+    price = float(df.iloc[br.broken_idx]["low"])
+    if price >= br.swing_price:
+        return None
+    return Pivot(idx=br.broken_idx, kind="LOW", price=price, label="LL")
+
+
+def _end_peak_from_df_after_break(
+    df: pd.DataFrame,
+    br: StructureBreak,
+    *,
+    before_idx: int | None,
+    min_bar_idx: int,
+) -> Pivot | None:
+    """HH/LL после break по wick'ам df, пока pivot ещё не подтверждён.
+
+    Нужно для CHOCH LONG, где пик (напр. INJ 1H 10.05.26 22:00) появляется
+    через 1–3 бара после CHoCH, а pivot HIGH подтверждается только через
+    ``swing_size`` баров (см. PREPARE 11.05.26 00:00 MSK).
+    """
+    if br.broken_idx >= len(df):
+        return None
+    last_pos = int(df.index[-1])
+    hi = last_pos if before_idx is None else min(before_idx - 1, last_pos)
+    lo = max(br.broken_idx, min_bar_idx)
+    if hi < lo:
+        return None
+    sub = df.iloc[lo : hi + 1]
+    if sub.empty:
+        return None
+    if br.direction == "LONG":
+        price = float(sub["high"].max())
+        if price <= br.swing_price:
+            return None
+        idx = int(sub["high"].idxmax())
+        return Pivot(idx=idx, kind="HIGH", price=price, label="HH")
+    price = float(sub["low"].min())
+    if price >= br.swing_price:
+        return None
+    idx = int(sub["low"].idxmin())
+    return Pivot(idx=idx, kind="LOW", price=price, label="LL")
+
+
+def prepare_emission_bar_idx(
+    *,
+    leg_end_idx: int,
+    anchor_break_idx: int | None,
+    swing_size: int,
+    touch_idx: int,
+) -> int:
+    """Индекс бара эмиссии PREPARE: первое касание 0.5 или после confirm пика.
+
+    Для continuation-BOS пик часто на баре пробоя (``leg_end == anchor``):
+    эмиссия на ``touch_idx``, без ожидания ``swing_size`` confirm pivot.
+
+    Если пик в окне ``[leg_end, anchor + swing_size]`` (типичный CHOCH-импульс
+    сразу после flip), эмитируем на первом касании 0.5 — иначе теряются
+    INJ 1H 10.05.26 23:00 / 12.05.26 15:00. Иначе — классика
+    ``max(leg_end + swing_size, touch_idx)`` (пик подтверждён позже).
+    """
+    if touch_idx < 0:
+        return -1
+    anchor = anchor_break_idx if anchor_break_idx is not None else -1
+    if anchor >= 0:
+        if leg_end_idx == anchor:
+            return touch_idx
+        if leg_end_idx >= anchor - swing_size and leg_end_idx <= anchor + swing_size:
+            # CHOCH: пик рядом с flip, касание 0.5 — часто на следующем баре
+            # (INJ 1H 11.05.26 00:00 MSK после wick 23:00).
+            if touch_idx > leg_end_idx:
+                return touch_idx + 1
+            return touch_idx
+    return max(leg_end_idx + swing_size, touch_idx)
+
+
 def _build_leg_from_break(
     pivots: list[Pivot],
     br: StructureBreak,
@@ -314,6 +406,7 @@ def _build_leg_from_break(
     next_same_dir_break_idx: int | None = None,
     min_end_idx: int = -1,
     previous_opposite_broken_idx: int = -1,
+    df: pd.DataFrame | None = None,
 ) -> ImpulseLeg | None:
     """Собрать импульсную ногу от BOS/CHoCH.
 
@@ -355,9 +448,7 @@ def _build_leg_from_break(
     else:
         after_end_idx = max(min_end_idx, -1)
 
-    # 1) Сначала ищем подтверждённый ``end`` ВНУТРИ текущего сегмента (между
-    #    предыдущим break того же направления и ``broken_idx``) — это покрывает
-    #    кейсы CHOCH/первого BOS, где LL/HH уже сформирован до пробоя.
+    # 1) Подтверждённый ``end`` до ``broken_idx``.
     end_pivot = _last_pivot_before_breaking_threshold(
         pivots,
         before_idx=br.broken_idx,
@@ -367,19 +458,31 @@ def _build_leg_from_break(
         threshold_price=br.swing_price,
         after_idx=after_end_idx,
     )
+    # CHOCH: не использовать пробитый swing (LH/HL на ``swing_idx``) как end.
+    if (
+        br.kind == "CHOCH"
+        and end_pivot is not None
+        and end_pivot.idx <= br.swing_idx
+    ):
+        end_pivot = None
     # 2) Если в сегменте нет ничего глубже свинга — берём НОВЫЙ pivot ПОСЛЕ
     #    ``broken_idx`` (continuation BOS, где new LL/HH формируется уже после
     #    самого пробоя и подтверждается с задержкой ``swing_size``). Окно
     #    ограничено сверху следующим break того же направления, иначе мы бы
     #    «забирали» pivot, принадлежащий уже следующей ноге.
     if end_pivot is None:
+        # CHOCH: пик импульса часто после бара следующего BOS (``broken_idx`` cap
+        # отрезал бы его — см. unit ``test_confirmed_short_impulse_resets``).
+        post_break_before = (
+            None if br.kind == "CHOCH" else next_same_dir_break_idx
+        )
         end_pivot = _first_pivot_after_breaking_threshold(
             pivots,
             after_idx=max(br.broken_idx, after_end_idx),
             kind=end_kind,
             direction=br.direction,
             threshold_price=br.swing_price,
-            before_idx=next_same_dir_break_idx,
+            before_idx=post_break_before,
         )
     # 3) Fallback на ``swing pivot`` (когда ни до, ни после нет более глубокого
     #    экстремума — например, флэт после break без явного нового пика).
@@ -389,6 +492,33 @@ def _build_leg_from_break(
         )
         if end_pivot is not None and after_end_idx >= 0 and end_pivot.idx <= after_end_idx:
             end_pivot = None
+        if (
+            br.kind == "CHOCH"
+            and end_pivot is not None
+            and end_pivot.idx <= br.swing_idx
+        ):
+            end_pivot = None
+    if end_pivot is None and df is not None:
+        end_pivot = _end_pivot_from_break_bar(df, br, after_end_idx=after_end_idx)
+    if df is not None:
+        if br.kind == "CHOCH" and (
+            end_pivot is None or end_pivot.idx <= br.swing_idx
+        ):
+            df_peak = _end_peak_from_df_after_break(
+                df,
+                br,
+                before_idx=next_same_dir_break_idx,
+                min_bar_idx=max(min_end_idx, br.broken_idx),
+            )
+            if df_peak is not None:
+                end_pivot = df_peak
+        elif br.kind == "BOS" and end_pivot is not None and end_pivot.idx < br.broken_idx:
+            break_bar = _end_pivot_from_break_bar(df, br, after_end_idx=after_end_idx)
+            if break_bar is not None and (
+                (br.direction == "LONG" and break_bar.price > end_pivot.price)
+                or (br.direction == "SHORT" and break_bar.price < end_pivot.price)
+            ):
+                end_pivot = break_bar
     if end_pivot is None:
         return None
 
@@ -514,6 +644,7 @@ def extract_impulse_legs_confirmed(
             next_same_dir_break_idx=next_same_dir_break_idx_by_pos[i],
             min_end_idx=last_end_idx_by_dir.get(br.direction, -1),
             previous_opposite_broken_idx=last_broken_idx_by_dir.get(opposite, -1),
+            df=df,
         )
         if leg is None:
             continue
@@ -1770,12 +1901,12 @@ def prepare_emission_on_current_bar(
     touch_direction: str,
     level: float,
     since_idx: int | None = None,
+    anchor_break_idx: int | None = None,
 ) -> tuple[int, int] | None:
-    """Бар эмиссии PREPARE = ``max(leg_end_idx + swing_size, touch_idx)``.
+    """Бар эмиссии PREPARE на первом касании 0.5 (или после confirm пика).
 
     Возвращает ``(emission_bar_idx, touch_idx)``, если эмиссия должна быть на
-    **текущем** баре df; иначе ``None``. Учитывает касания 0.5 во время окна
-    подтверждения пивота (``touch_idx < leg_end_idx + swing_size``).
+    **текущем** баре df; иначе ``None``.
     """
     last_pos = int(df.index[-1])
     since = leg_end_idx if since_idx is None else since_idx
@@ -1784,7 +1915,12 @@ def prepare_emission_on_current_bar(
     )
     if touch_idx < 0:
         return None
-    emission_bar = max(leg_end_idx + swing_size, touch_idx)
+    emission_bar = prepare_emission_bar_idx(
+        leg_end_idx=leg_end_idx,
+        anchor_break_idx=anchor_break_idx,
+        swing_size=swing_size,
+        touch_idx=touch_idx,
+    )
     if emission_bar != last_pos:
         return None
     return emission_bar, touch_idx

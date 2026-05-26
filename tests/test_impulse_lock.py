@@ -1151,3 +1151,126 @@ def test_choch_long_start_includes_pivot_at_opposite_break_bar() -> None:
     assert leg.start_idx == 26
     assert leg.start_price == 4.087
     assert leg.end_idx == 39
+
+
+def test_choch_long_leg_uses_df_peak_before_pivot_confirm() -> None:
+    """CHOCH LONG: HH по wick после flip, пока pivot HIGH ещё не confirm."""
+    import pandas as pd
+
+    rows = []
+    for i in range(45):
+        hi = 4.396 if i == 30 else 4.25
+        lo = 4.08 if i == 26 else 4.20
+        rows.append(
+            {
+                "open_time": i * 3_600_000,
+                "open": 4.2,
+                "high": hi,
+                "low": lo,
+                "close": 4.2,
+                "volume": 1.0,
+            }
+        )
+    df = pd.DataFrame(rows)
+    pivots = [
+        Pivot(idx=20, kind="LOW", price=4.10, label="LL"),
+        Pivot(idx=26, kind="LOW", price=4.087, label="LL"),
+        Pivot(idx=30, kind="HIGH", price=4.24, label="LH"),
+    ]
+    br = StructureBreak("LONG", "CHOCH", swing_idx=30, swing_price=4.24, broken_idx=27)
+    leg = _build_leg_from_break(
+        pivots,
+        br,
+        min_idx=10,
+        previous_opposite_broken_idx=26,
+        next_same_dir_break_idx=None,
+        df=df,
+    )
+    assert leg is not None
+    assert leg.start_price == 4.087
+    assert leg.end_idx == 30
+    assert abs(leg.end_price - 4.396) < 0.01
+
+
+def test_bos_long_leg_uses_break_bar_high_before_pivot_confirm() -> None:
+    """BOS LONG: HH на баре пробоя — end ноги до confirm pivot."""
+    import pandas as pd
+
+    rows = []
+    closes = [4.20] * 8 + [4.30, 4.35, 4.40, 4.396, 4.42, 4.44, 4.45, 4.45, 4.33]
+    for i, c in enumerate(closes):
+        hi = 4.51 if i == 13 else c + 0.01
+        rows.append(
+            {
+                "open_time": i * 3_600_000,
+                "open": c,
+                "high": hi,
+                "low": c - 0.01,
+                "close": c,
+                "volume": 1.0,
+            }
+        )
+    df = pd.DataFrame(rows)
+    pivots = [Pivot(idx=8, kind="LOW", price=4.175, label="HL")]
+    br = StructureBreak("LONG", "BOS", swing_idx=12, swing_price=4.396, broken_idx=13)
+    leg = _build_leg_from_break(
+        pivots, br, min_idx=-1, previous_opposite_broken_idx=5, df=df
+    )
+    assert leg is not None
+    assert leg.end_idx == 13
+    assert leg.end_price > br.swing_price
+    assert abs(leg.end_price - 4.51) < 0.01
+    assert leg.start_price == 4.175
+
+
+def test_prepare_emission_on_touch_bar_when_peak_on_bos_bar() -> None:
+    """PREPARE на баре касания 0.5, если пик на баре BOS (leg_end == anchor)."""
+    import pandas as pd
+
+    from bot.market.pivots import prepare_emission_bar_idx, prepare_emission_on_current_bar
+
+    fib05 = 4.3425
+    assert (
+        prepare_emission_bar_idx(
+            leg_end_idx=13, anchor_break_idx=13, swing_size=4, touch_idx=14
+        )
+        == 14
+    )
+    # CHOCH: end рядом с anchor, touch после пика — бар после касания.
+    assert (
+        prepare_emission_bar_idx(
+            leg_end_idx=12, anchor_break_idx=15, swing_size=4, touch_idx=16
+        )
+        == 17
+    )
+    # Пик далеко до anchor — ждём confirm pivot, не окно CHOCH.
+    assert (
+        prepare_emission_bar_idx(
+            leg_end_idx=5, anchor_break_idx=15, swing_size=4, touch_idx=20
+        )
+        == 20
+    )
+    big = pd.DataFrame(
+        [
+            {
+                "open_time": i * 3_600_000,
+                "open": 4.5,
+                "high": 4.51,
+                "low": 4.4,
+                "close": 4.5,
+                "volume": 1.0,
+            }
+            for i in range(15)
+        ]
+    )
+    big.iloc[14, big.columns.get_loc("low")] = fib05 - 0.01
+    em = prepare_emission_on_current_bar(
+        big,
+        leg_end_idx=13,
+        swing_size=4,
+        touch_direction="LONG",
+        level=fib05,
+        since_idx=13,
+        anchor_break_idx=13,
+    )
+    assert em == (14, 14)

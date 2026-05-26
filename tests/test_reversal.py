@@ -78,7 +78,8 @@ def test_reversal_prepare_long_after_choch_up_triggers_on_first_touch() -> None:
     assert float(payload["invalidation_price"]) == float(payload["impulse_start_price"])
     assert float(payload["invalidation_price"]) < trigger
     last = df.iloc[-1]
-    assert float(last["low"]) <= trigger <= float(last["high"])
+    # LONG: касание 0.5 по low (как ``find_first_touch_idx``), не обязательно внутри range.
+    assert float(last["low"]) <= trigger
     assert "touch_open_ms" in event.payload
     assert int(event.payload["touch_open_ms"]) <= int(last["open_time"])
 

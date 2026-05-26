@@ -14,6 +14,7 @@ from bot.market.pivots import (
     find_first_touch_idx,
     impulse_invalidated,
     latest_structure_break,
+    prepare_emission_bar_idx,
     prepare_emission_on_current_bar,
     prepare_suppressed_after_trend_flip,
     prepare_suppressed_during_impulse_lock,
@@ -209,7 +210,12 @@ def detect_continuation_prepare(
             _funnel_inc(funnel, "no_touch_yet")
             continue
 
-        emission_bar = max(cand.end_idx + swing_size, touch_idx)
+        emission_bar = prepare_emission_bar_idx(
+            leg_end_idx=cand.end_idx,
+            anchor_break_idx=cand.anchor_break_idx,
+            swing_size=swing_size,
+            touch_idx=touch_idx,
+        )
         if emission_bar != last_pos:
             if emission_bar < last_pos:
                 _funnel_inc(funnel, "emission_bar_in_past")
@@ -224,6 +230,7 @@ def detect_continuation_prepare(
             touch_direction=cand.direction,
             level=cand_trigger,
             since_idx=since_touch,
+            anchor_break_idx=cand.anchor_break_idx,
         )
         if emission is None:
             continue
