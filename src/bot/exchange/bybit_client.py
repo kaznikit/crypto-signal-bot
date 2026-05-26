@@ -44,24 +44,54 @@ class BybitClient:
 
     async def fetch_klines(self, symbol: str, timeframe: str, limit: int = 500) -> list[Candle]:
         interval = INTERVAL_MAP[timeframe]
-        async with self._semaphore:
-            payload: dict[str, Any] = await asyncio.to_thread(
-                self._http.get_kline,
-                category=self._category,
-                symbol=symbol,
-                interval=interval,
-                limit=limit,
-            )
-        rows = payload.get("result", {}).get("list", [])
-        rows = list(reversed(rows))
+        if limit <= 0:
+            return []
+
+        all_rows: list[list[Any]] = []
+        remaining = int(limit)
+        end: int | None = None
+
+        while remaining > 0:
+            page_limit = min(1000, remaining)
+            req_kwargs: dict[str, Any] = {
+                "category": self._category,
+                "symbol": symbol,
+                "interval": interval,
+                "limit": page_limit,
+            }
+            if end is not None:
+                req_kwargs["end"] = end
+
+            async with self._semaphore:
+                payload: dict[str, Any] = await asyncio.to_thread(
+                    self._http.get_kline,
+                    **req_kwargs,
+                )
+
+            rows = payload.get("result", {}).get("list", [])
+            if not rows:
+                break
+            all_rows.extend(rows)
+            remaining -= len(rows)
+
+            oldest_open_time = min(int(r[0]) for r in rows)
+            end = oldest_open_time - 1
+            if len(rows) < page_limit:
+                break
+
+        # Bybit returns rows in reverse order; pages may overlap on boundaries.
+        dedup: dict[int, list[Any]] = {}
+        for row in all_rows:
+            dedup[int(row[0])] = row
+
         return [
             Candle(
-                open_time=int(r[0]),
-                open=float(r[1]),
-                high=float(r[2]),
-                low=float(r[3]),
-                close=float(r[4]),
-                volume=float(r[5]),
+                open_time=open_time,
+                open=float(row[1]),
+                high=float(row[2]),
+                low=float(row[3]),
+                close=float(row[4]),
+                volume=float(row[5]),
             )
-            for r in rows
+            for open_time, row in sorted(dedup.items())
         ]

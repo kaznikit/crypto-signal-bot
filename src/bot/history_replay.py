@@ -50,6 +50,11 @@ TF_MS: dict[str, int] = {
     "4H": 4 * 60 * 60 * 1000,
 }
 
+# Практический upper bound для младших TF в replay.
+# Без cap горизонт 4H→5M при limit=1000 требует 48k баров и делает walk-forward
+# слишком тяжёлым по времени.
+MAX_EXPANDED_BARS_PER_TF = 4_000
+
 
 @dataclass(slots=True)
 class ReplaySetup:
@@ -126,18 +131,67 @@ def _find_config_path() -> Path:
 
 def _load_timeframes(
     mode: str,
+    cfg: Any,
+    focus_htf: str | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    needed = {"5M", "15M", "1H"}
-    if mode in {"reversal", "both", "continuation"}:
-        needed.add("4H")
-
     replay_targets: list[str] = []
-    if mode in {"reversal", "both"}:
+    if mode in {"reversal", "both"} and (focus_htf is None or focus_htf == "4H"):
         replay_targets.append("reversal")
-    if mode in {"continuation", "both"}:
+    if mode in {"continuation", "both"} and (
+        focus_htf is None or focus_htf in set(cfg.prepare_htfs())
+    ):
         replay_targets.append("continuation")
+    needed: set[str] = set()
+
+    if "reversal" in replay_targets:
+        needed.add("4H")
+        needed.update(
+            tf
+            for tf in str(ltf_expected_for_htf("4H", cfg.entry)).split("|")
+            if tf and tf in TF_MS
+        )
+
+    if "continuation" in replay_targets:
+        if focus_htf is None:
+            cont_htfs = cfg.prepare_htfs()
+        else:
+            cont_htfs = tuple(htf for htf in cfg.prepare_htfs() if htf == focus_htf)
+        for htf in cont_htfs:
+            needed.add(htf)
+            needed.update(
+                tf
+                for tf in str(ltf_expected_for_htf(htf, cfg.entry)).split("|")
+                if tf and tf in TF_MS
+            )
+
+    # Safety net: replay requires at least one LTF stream for ENTRY checks.
+    if not any(tf in needed for tf in ("5M", "15M", "1H", "4H")):
+        needed.add("5M")
 
     return tuple(sorted(needed, key=lambda tf: TF_MS[tf])), tuple(replay_targets)
+
+
+def _expanded_limits_by_tf(
+    *,
+    needed_tfs: tuple[str, ...],
+    limit: int,
+) -> dict[str, int]:
+    """Расширить лимиты младших TF до горизонта старшего TF.
+
+    Пример: при ``limit=1000`` и старшем TF=4H для ``5M`` нужно ~48000 баров,
+    иначе ранние PREPARE на 1H/4H остаются без LTF-подтверждения только из-за
+    нехватки глубины младшего таймфрейма.
+    """
+    if limit <= 0:
+        return {tf: 0 for tf in needed_tfs}
+    max_tf_ms = max(TF_MS[tf] for tf in needed_tfs)
+    out: dict[str, int] = {}
+    for tf in needed_tfs:
+        tf_ms = TF_MS[tf]
+        # ceil(limit * max_tf_ms / tf_ms)
+        scaled = (limit * max_tf_ms + tf_ms - 1) // tf_ms
+        out[tf] = min(MAX_EXPANDED_BARS_PER_TF, max(limit, int(scaled)))
+    return out
 
 
 def _invalidate_armed_replay_setups_by_key(
@@ -878,6 +932,7 @@ async def run_history_replay(
     config_path: Path,
     events_out: list[dict[str, Any]] | None = None,
     quiet: bool = False,
+    focus_htf: str | None = None,
 ) -> None:
     if not quiet:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -889,9 +944,13 @@ async def run_history_replay(
         api_secret=env.bybit_api_secret,
     )
 
-    needed_tfs, replay_targets = _load_timeframes(mode)
+    needed_tfs, replay_targets = _load_timeframes(mode, cfg, focus_htf=focus_htf)
+    limit_by_tf = _expanded_limits_by_tf(needed_tfs=needed_tfs, limit=limit)
 
-    tasks = [client.fetch_klines(symbol=symbol, timeframe=tf, limit=limit) for tf in needed_tfs]
+    tasks = [
+        client.fetch_klines(symbol=symbol, timeframe=tf, limit=limit_by_tf[tf])
+        for tf in needed_tfs
+    ]
     candles_by_tf = await asyncio.gather(*tasks)
     dfs: dict[str, Any] = {}
     for tf, candles in zip(needed_tfs, candles_by_tf, strict=True):
@@ -948,6 +1007,8 @@ async def run_history_replay(
                 )
 
         prepare_htfs = cfg.prepare_htfs()
+        if focus_htf is not None:
+            prepare_htfs = tuple(tf for tf in prepare_htfs if tf == focus_htf)
         if "reversal" in replay_targets and "4H" in prepare_htfs and "4H" in closed_now:
             df_4h = series["4H"]
             liberal_cfg = cfg.paper_mode.liberal
@@ -1500,7 +1561,12 @@ def main() -> None:
         choices=("reversal", "continuation", "both"),
         help="Какие сетапы симулировать",
     )
-    parser.add_argument("--limit", type=int, default=1000, help="Candles per timeframe (max 1000)")
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Bars on the highest TF; lower TF limits are auto-expanded (with safety cap)",
+    )
     parser.add_argument(
         "--top-reasons",
         type=int,

@@ -296,6 +296,7 @@ def run_export_from_replay(
     mode: str,
     max_markers: int,
 ) -> None:
+    focus_htf = tf if tf in {"4H", "1H", "15M"} else None
     events: list[dict[str, Any]] = []
     asyncio.run(
         run_history_replay(
@@ -306,6 +307,7 @@ def run_export_from_replay(
             config_path=config_path,
             events_out=events,
             quiet=True,
+            focus_htf=focus_htf,
         )
     )
     print(f"Replay produced {len(events)} events before filters")
@@ -365,7 +367,7 @@ def main() -> None:
         "--limit",
         type=int,
         default=1000,
-        help="Сколько свечей на TF (только для --from-replay, max 1000)",
+        help="Базовый лимит replay на старшем TF (для --from-replay)",
     )
     parser.add_argument(
         "--mode",
