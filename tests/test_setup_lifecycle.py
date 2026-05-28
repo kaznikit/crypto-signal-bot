@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-from bot.analyzer.setup_lifecycle import decide_setup_structure_transition
+from bot.analyzer.setup_lifecycle import (
+    SetupStructureDecision,
+    apply_reset_after_first_entry_policy,
+    decide_setup_structure_transition,
+)
 from bot.market.pivots import StructureBreak
 
 
@@ -76,3 +80,15 @@ def test_decide_setup_structure_transition_keep() -> None:
     )
     assert decision.action == "KEEP"
     assert decision.trigger is None
+
+
+def test_apply_reset_policy_skips_before_first_entry() -> None:
+    decision = SetupStructureDecision(action="RESET_SAME_DIRECTION", trigger=None)
+    adjusted = apply_reset_after_first_entry_policy(decision=decision, entry_count=0)
+    assert adjusted.action == "KEEP"
+
+
+def test_apply_reset_policy_keeps_after_first_entry() -> None:
+    decision = SetupStructureDecision(action="RESET_SAME_DIRECTION", trigger=None)
+    adjusted = apply_reset_after_first_entry_policy(decision=decision, entry_count=1)
+    assert adjusted.action == "RESET_SAME_DIRECTION"

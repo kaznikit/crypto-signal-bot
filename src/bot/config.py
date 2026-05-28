@@ -121,6 +121,8 @@ class EntryConfig(BaseModel):
     confirm_mode: str = "structure_break"
     # true — swing для ENTRY = pivots.swing_size_by_tf (как линии BOS на оверлее).
     ltf_swing_use_pivot_sizes: bool = False
+    # Максимум ENTRY-сигналов на один setup, пока он остаётся валидным.
+    max_entries_per_setup: int = 2
 
 
 class FiltersConfig(BaseModel):

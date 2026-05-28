@@ -2,11 +2,22 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from pybit.unified_trading import HTTP
 
 INTERVAL_MAP: dict[str, str] = {"5M": "5", "15M": "15", "1H": "60", "4H": "240"}
+INTERVAL_MS_MAP: dict[str, int] = {
+    "5M": 5 * 60 * 1000,
+    "15M": 15 * 60 * 1000,
+    "1H": 60 * 60 * 1000,
+    "4H": 4 * 60 * 60 * 1000,
+}
+
+
+def _now_utc_ms() -> int:
+    return int(datetime.now(tz=UTC).timestamp() * 1000)
 
 
 @dataclass(slots=True)
@@ -84,7 +95,7 @@ class BybitClient:
         for row in all_rows:
             dedup[int(row[0])] = row
 
-        return [
+        candles = [
             Candle(
                 open_time=open_time,
                 open=float(row[1]),
@@ -95,3 +106,9 @@ class BybitClient:
             )
             for open_time, row in sorted(dedup.items())
         ]
+        # Bybit часто отдаёт формирующийся текущий бар. Для детерминизма стратегии
+        # работаем только с полностью закрытыми свечами.
+        tf_ms = INTERVAL_MS_MAP[timeframe]
+        if candles and (candles[-1].open_time + tf_ms > _now_utc_ms()):
+            candles = candles[:-1]
+        return candles

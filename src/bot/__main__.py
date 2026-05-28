@@ -13,8 +13,14 @@ from bot.analyzer.entry_ltf import (
     prepare_since_open_ms,
 )
 from bot.analyzer.filters import atr_percent, close_beyond_level, finalize_entry_levels
+from bot.analyzer.reentry import (
+    reentry_has_new_structure_break,
+    reentry_price_improved,
+    reentry_swing_reset_reached,
+)
 from bot.analyzer.reversal import detect_reversal_prepare
 from bot.analyzer.setup_lifecycle import decide_setup_structure_transition
+from bot.analyzer.setup_lifecycle import apply_reset_after_first_entry_policy
 from bot.analyzer.setup_machine import tick_setup
 from bot.analyzer.setup_runtime import check_price_invalidation, resolve_ltf_confirmation
 from bot.analyzer.strategy_gates import (
@@ -446,6 +452,7 @@ class SignalBotApp:
     ) -> None:
         active = [s for s in self._repo.load_active_setups() if s.symbol == symbol]
         liberal_cfg = self._cfg.paper_mode.liberal
+        max_entries_per_setup = max(1, int(self._cfg.entry.max_entries_per_setup))
         htf_breaks_cache: dict[str, list[Any]] = {}
         if active and not series:
             funnel["active_setups_waiting_no_fresh_ltf"] += len(active)
@@ -472,6 +479,13 @@ class SignalBotApp:
                     setup_direction=setup.direction,
                     since_open_ms=prepare_since_open_ms(setup),
                 )
+                raw_action = decision.action
+                decision = apply_reset_after_first_entry_policy(
+                    decision=decision,
+                    entry_count=int(setup.entry_count or 0),
+                )
+                if raw_action == "RESET_SAME_DIRECTION" and decision.action == "KEEP":
+                    funnel["setup_reset_same_direction_skipped_before_first_entry"] += 1
                 if decision.action == "INVALIDATE_OPPOSITE":
                     self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
                     funnel["setup_invalidated_by_opposite_structure"] += 1
@@ -534,9 +548,9 @@ class SignalBotApp:
             if phase_new is not None:
                 self._repo.update_setup_phase(setup.id, phase_new)
                 setup.phase = phase_new
-            if state != setup.state:
-                self._repo.mark_setup_state(setup.id, state, utcnow())
             if event is None:
+                if state != setup.state:
+                    self._repo.mark_setup_state(setup.id, state, utcnow())
                 funnel["active_setup_no_event"] += 1
                 continue
 
@@ -553,9 +567,39 @@ class SignalBotApp:
             payload["ote_low"] = setup.ote_low
             payload["ote_high"] = setup.ote_high
             payload["liberal"] = setup.is_liberal
+            payload["confirm_kind"] = str(choch.kind)
+            payload["confirm_level"] = float(choch.level)
+            payload["confirm_bars_ago"] = int(choch.bars_ago)
+            payload["confirm_broken_open_ms"] = choch.broken_open_ms
+            payload["confirm_reset_level"] = choch.reset_level
 
             if event.kind == "ENTRY":
                 payload["entry"] = float(row["close"])
+                if setup.last_entry_bar_ms is not None and int(setup.last_entry_bar_ms) == bar_open_ms:
+                    funnel["entry_skipped_duplicate_bar"] += 1
+                    continue
+                if int(setup.entry_count or 0) >= max_entries_per_setup:
+                    self._repo.mark_setup_state(setup.id, "CONFIRMED", utcnow())
+                    setup.state = "CONFIRMED"
+                    funnel["entry_limit_reached"] += 1
+                    continue
+                payload["entry_index"] = int(setup.entry_count or 0) + 1
+                payload["entries_max"] = max_entries_per_setup
+                if int(setup.entry_count or 0) > 0:
+                    if not reentry_has_new_structure_break(
+                        confirm_broken_open_ms=choch.broken_open_ms,
+                        last_entry_bar_ms=setup.last_entry_bar_ms,
+                    ):
+                        funnel["entry_reentry_wait_new_structure_break"] += 1
+                        continue
+                    if not reentry_swing_reset_reached(
+                        ltf_df=ltf_df,
+                        direction=setup.direction,
+                        last_entry_bar_ms=setup.last_entry_bar_ms,
+                        last_entry_swing_level=setup.last_entry_swing_level,
+                    ):
+                        funnel["entry_reentry_wait_reset_swing"] += 1
+                        continue
                 if self._cfg.entry.require_close_beyond_choch:
                     level = choch.level if choch else float(row["close"])
                     if not close_beyond_level(float(row["close"]), level, setup.direction):
@@ -563,6 +607,13 @@ class SignalBotApp:
                         continue
 
                 entry_price = float(row["close"])
+                if int(setup.entry_count or 0) > 0 and not reentry_price_improved(
+                    direction=setup.direction,
+                    entry_price=entry_price,
+                    last_entry_price=setup.last_entry_price,
+                ):
+                    funnel["entry_reentry_wait_better_price"] += 1
+                    continue
                 min_rr = (
                     liberal_cfg.min_rr
                     if setup.is_liberal and liberal_cfg.enabled
@@ -592,8 +643,23 @@ class SignalBotApp:
                     paper_mode=self._cfg.paper_mode.enabled,
                     liberal_paper_only=bool(setup.is_liberal),
                 )
-                if signal_row is not None:
-                    self._repo.save_signal(signal_row)
+                if signal_row is None:
+                    funnel["entry_send_skipped"] += 1
+                    continue
+                self._repo.save_signal(signal_row)
+                setup.entry_count = int(setup.entry_count or 0) + 1
+                setup.last_entry_bar_ms = bar_open_ms
+                setup.last_entry_price = entry_price
+                setup.last_entry_swing_level = (
+                    float(choch.reset_level) if choch.reset_level is not None else None
+                )
+                setup.state = (
+                    "CONFIRMED" if int(setup.entry_count) >= max_entries_per_setup else "ARMED"
+                )
+                setup.updated_at = utcnow()
+                self._repo.upsert_setup(setup)
+                if setup.state == "ARMED":
+                    funnel["entry_sent_keep_setup_armed"] += 1
                 funnel["entry_sent"] += 1
             elif event.kind == "INVALIDATED":
                 payload["invalidation_price"] = setup.invalidation_price
@@ -608,6 +674,8 @@ class SignalBotApp:
                 if signal_row is not None:
                     self._repo.save_signal(signal_row)
                 funnel["invalidated_sent"] += 1
+            elif state != setup.state:
+                self._repo.mark_setup_state(setup.id, state, utcnow())
 
 
 async def _main() -> None:

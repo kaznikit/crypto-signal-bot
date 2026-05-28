@@ -49,6 +49,14 @@ class Setup(Base):
     is_liberal: Mapped[bool] = mapped_column(Boolean, default=False)
     # open_time (ms) бара PREPARE на HTF — якорь для since_prepare на LTF
     prepare_since_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Сколько ENTRY уже отправлено по этому setup.
+    entry_count: Mapped[int] = mapped_column(Integer, default=0)
+    # open_time (ms) бара, на котором отправляли последний ENTRY.
+    last_entry_bar_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Цена последнего отправленного ENTRY.
+    last_entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Reset-swing уровень (LTF) для re-entry: LONG -> прошлый LOW, SHORT -> прошлый HIGH.
+    last_entry_swing_level: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

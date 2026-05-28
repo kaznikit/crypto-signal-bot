@@ -18,8 +18,14 @@ from bot.analyzer.entry_ltf import (
     prepare_since_open_ms,
 )
 from bot.analyzer.filters import atr_percent, close_beyond_level, finalize_entry_levels
+from bot.analyzer.reentry import (
+    reentry_has_new_structure_break,
+    reentry_price_improved,
+    reentry_swing_reset_reached,
+)
 from bot.analyzer.reversal import detect_reversal_prepare
 from bot.analyzer.setup_lifecycle import decide_setup_structure_transition
+from bot.analyzer.setup_lifecycle import apply_reset_after_first_entry_policy
 from bot.analyzer.setup_runtime import check_price_invalidation, resolve_ltf_confirmation
 from bot.analyzer.strategy_gates import (
     evaluate_continuation_prepare_detailed,
@@ -73,6 +79,10 @@ class ReplaySetup:
     phase: str = "WAIT_CHOCH"
     is_liberal: bool = False
     prepare_since_ms: int | None = None
+    entry_count: int = 0
+    last_entry_bar_ms: int | None = None
+    last_entry_price: float | None = None
+    last_entry_swing_level: float | None = None
 
 
 @dataclass(slots=True)
@@ -937,6 +947,7 @@ async def run_history_replay(
     if not quiet:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
     cfg = load_bot_config(config_path)
+    max_entries_per_setup = max(1, int(cfg.entry.max_entries_per_setup))
     env = EnvConfig()
     client = BybitClient(
         category=cfg.exchange.category,
@@ -1318,6 +1329,13 @@ async def run_history_replay(
                     setup_direction=setup.direction,
                     since_open_ms=prepare_since_open_ms(setup),
                 )
+                raw_action = decision.action
+                decision = apply_reset_after_first_entry_policy(
+                    decision=decision,
+                    entry_count=int(setup.entry_count or 0),
+                )
+                if raw_action == "RESET_SAME_DIRECTION" and decision.action == "KEEP":
+                    funnel["setup_reset_same_direction_skipped_before_first_entry"] += 1
                 if decision.action == "INVALIDATE_OPPOSITE":
                     setup.state = "INVALIDATED"
                     funnel["setup_invalidated_by_opposite_structure"] += 1
@@ -1399,10 +1417,38 @@ async def run_history_replay(
             if choch is None:
                 continue
             funnel[f"entry_confirm_{choch.kind.lower()}_{used_tf.lower()}"] += 1
-
-            setup.state = "CONFIRMED"
+            bar_open_ms = int(row["open_time"])
+            if setup.last_entry_bar_ms is not None and int(setup.last_entry_bar_ms) == bar_open_ms:
+                funnel["entry_skipped_duplicate_bar"] += 1
+                continue
+            if int(setup.entry_count or 0) >= max_entries_per_setup:
+                setup.state = "CONFIRMED"
+                funnel["entry_limit_reached"] += 1
+                continue
+            if int(setup.entry_count or 0) > 0:
+                if not reentry_has_new_structure_break(
+                    confirm_broken_open_ms=choch.broken_open_ms,
+                    last_entry_bar_ms=setup.last_entry_bar_ms,
+                ):
+                    funnel["entry_reentry_wait_new_structure_break"] += 1
+                    continue
+                if not reentry_swing_reset_reached(
+                    ltf_df=ltf_df,
+                    direction=setup.direction,
+                    last_entry_bar_ms=setup.last_entry_bar_ms,
+                    last_entry_swing_level=setup.last_entry_swing_level,
+                ):
+                    funnel["entry_reentry_wait_reset_swing"] += 1
+                    continue
 
             entry = float(row["close"])
+            if int(setup.entry_count or 0) > 0 and not reentry_price_improved(
+                direction=setup.direction,
+                entry_price=entry,
+                last_entry_price=setup.last_entry_price,
+            ):
+                funnel["entry_reentry_wait_better_price"] += 1
+                continue
             if cfg.entry.require_close_beyond_choch:
                 level = float(choch.level)
                 if not close_beyond_level(entry, level, setup.direction):
@@ -1440,7 +1486,7 @@ async def run_history_replay(
                         setup_type=setup.setup_type,
                         direction=setup.direction,
                         tf=used_tf,
-                        entry_time=int(row["open_time"]),
+                        entry_time=bar_open_ms,
                         entry=entry,
                         sl=sl,
                         tp=tp,
@@ -1450,6 +1496,16 @@ async def run_history_replay(
                 funnel["entry_opened"] += 1
             else:
                 funnel["entry_opened_signal_only"] += 1
+
+            setup.entry_count = int(setup.entry_count or 0) + 1
+            setup.last_entry_bar_ms = bar_open_ms
+            setup.last_entry_price = entry
+            setup.last_entry_swing_level = (
+                float(choch.reset_level) if choch.reset_level is not None else None
+            )
+            setup.state = "CONFIRMED" if setup.entry_count >= max_entries_per_setup else "ARMED"
+            if setup.state == "ARMED":
+                funnel["entry_sent_keep_setup_armed"] += 1
 
             if events_out is not None:
                 ev: dict[str, Any] = {
@@ -1462,11 +1518,18 @@ async def run_history_replay(
                     "entry_ltf": used_tf,
                     "setup_htf": setup.htf,
                     "ltf_expected": setup.ltf_expected,
-                    "bar_open_ms": int(row["open_time"]),
+                    "bar_open_ms": bar_open_ms,
                     "entry": entry,
                     "ote_low": setup.ote_low,
                     "ote_high": setup.ote_high,
                     "is_liberal": setup.is_liberal,
+                    "entry_index": int(setup.entry_count),
+                    "entries_max": int(max_entries_per_setup),
+                    "confirm_kind": str(choch.kind),
+                    "confirm_level": float(choch.level),
+                    "confirm_bars_ago": int(choch.bars_ago),
+                    "confirm_broken_open_ms": choch.broken_open_ms,
+                    "confirm_reset_level": choch.reset_level,
                 }
                 if sl is not None and tp is not None:
                     ev["sl"] = sl

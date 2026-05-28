@@ -2024,6 +2024,11 @@ class LtfChoCh:
     level: float
     bars_ago: int
     kind: str = "CHOCH"  # "CHOCH" | "BOS"
+    # open_time бара пробоя на LTF (нужен для re-entry: требовать новый break).
+    broken_open_ms: int | None = None
+    # Opposite swing до пробоя (LONG -> последний LOW, SHORT -> последний HIGH).
+    # Используется как reset-уровень перед повторным входом.
+    reset_level: float | None = None
 
 
 def _bar_index_at_or_after(df: pd.DataFrame, open_time_ms: int) -> int:
@@ -2080,11 +2085,24 @@ def detect_ltf_entry_confirm(
     if not candidates:
         return None
     last = candidates[-1]
+    pivots = detect_pivots(df, swing_size=swing_size)
+    reset_level: float | None = None
+    if last.direction == "LONG":
+        lows = [p for p in pivots if p.kind == "LOW" and p.idx < last.broken_idx]
+        if lows:
+            reset_level = float(lows[-1].price)
+    elif last.direction == "SHORT":
+        highs = [p for p in pivots if p.kind == "HIGH" and p.idx < last.broken_idx]
+        if highs:
+            reset_level = float(highs[-1].price)
+    broken_open_ms = int(df.iloc[last.broken_idx]["open_time"])
     return LtfChoCh(
         direction=last.direction,
         level=last.swing_price,
         bars_ago=last_pos - last.broken_idx,
         kind=last.kind,
+        broken_open_ms=broken_open_ms,
+        reset_level=reset_level,
     )
 
 

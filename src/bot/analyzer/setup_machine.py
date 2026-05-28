@@ -36,6 +36,10 @@ def build_setup(
     phase: str = "WAIT_CHOCH",
     is_liberal: bool = False,
     prepare_since_ms: int | None = None,
+    entry_count: int = 0,
+    last_entry_bar_ms: int | None = None,
+    last_entry_price: float | None = None,
+    last_entry_swing_level: float | None = None,
 ) -> Setup:
     now = utcnow()
     return Setup(
@@ -54,6 +58,10 @@ def build_setup(
         phase=phase,
         is_liberal=is_liberal,
         prepare_since_ms=prepare_since_ms,
+        entry_count=entry_count,
+        last_entry_bar_ms=last_entry_bar_ms,
+        last_entry_price=last_entry_price,
+        last_entry_swing_level=last_entry_swing_level,
         created_at=now,
         updated_at=now,
         expires_at=now + timedelta(hours=ttl_hours),

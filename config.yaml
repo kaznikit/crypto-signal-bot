@@ -30,10 +30,11 @@ entry:
     "1H": "1H"
     "15M": "15M"
   ltf_swing_length:
-    "5M": 5
+    "5M": 8
     "15M": 6
     "1H": 8
   ltf_swing_use_pivot_sizes: false
+  max_entries_per_setup: 2
   ltf_max_bars_ago: 24
   ltf_max_bars_ago_by_tf:
     "5M": 96

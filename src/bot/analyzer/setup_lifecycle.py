@@ -23,6 +23,23 @@ class SetupStructureDecision:
         return self.action != "KEEP"
 
 
+def apply_reset_after_first_entry_policy(
+    *,
+    decision: SetupStructureDecision,
+    entry_count: int,
+) -> SetupStructureDecision:
+    """RESET_SAME_DIRECTION применяется только после первого ENTRY.
+
+    Пока setup не дал ни одного ENTRY, новый break в ту же сторону не
+    инвалидирует setup и не мешает дождаться первичного входа.
+    """
+    if decision.action != "RESET_SAME_DIRECTION":
+        return decision
+    if int(entry_count) > 0:
+        return decision
+    return SetupStructureDecision(action="KEEP", trigger=decision.trigger)
+
+
 def decide_setup_structure_transition(
     *,
     breaks: list[StructureBreak],

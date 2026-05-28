@@ -50,6 +50,16 @@ class Repository:
                 )
             if "prepare_since_ms" not in cols:
                 conn.execute(text("ALTER TABLE setups ADD COLUMN prepare_since_ms INTEGER"))
+            if "entry_count" not in cols:
+                conn.execute(
+                    text("ALTER TABLE setups ADD COLUMN entry_count INTEGER NOT NULL DEFAULT 0")
+                )
+            if "last_entry_bar_ms" not in cols:
+                conn.execute(text("ALTER TABLE setups ADD COLUMN last_entry_bar_ms INTEGER"))
+            if "last_entry_price" not in cols:
+                conn.execute(text("ALTER TABLE setups ADD COLUMN last_entry_price FLOAT"))
+            if "last_entry_swing_level" not in cols:
+                conn.execute(text("ALTER TABLE setups ADD COLUMN last_entry_swing_level FLOAT"))
 
     def upsert_setup(self, setup: Setup) -> None:
         with self._session_factory() as session:

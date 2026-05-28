@@ -98,9 +98,34 @@ class TelegramNotifier:
             entry_tf = payload.get("entry_ltf") or payload.get("htf")
             setup_tf = payload.get("setup_htf", "")
             tf_note = f" confirm={entry_tf} setup={setup_tf}" if entry_tf else ""
+            entry_idx = payload.get("entry_index")
+            entries_max = payload.get("entries_max")
+            idx_num: int | None = None
+            if entry_idx is not None:
+                try:
+                    idx_num = int(entry_idx)
+                except (TypeError, ValueError):
+                    idx_num = None
+            header = "ENTRY"
+            if idx_num == 1:
+                header = "ENTRY-1 [PRIMARY]"
+            elif idx_num == 2:
+                header = "ENTRY-2 [RE-ENTRY]"
+            elif idx_num is not None and idx_num > 2:
+                header = f"ENTRY-{idx_num} [ADD-ON]"
+            idx_note = (
+                f" entry#{entry_idx}/{entries_max}"
+                if entry_idx is not None and entries_max is not None
+                else ""
+            )
+            confirm_kind = payload.get("confirm_kind")
+            confirm_level = payload.get("confirm_level")
+            confirm_note = ""
+            if confirm_kind and confirm_level is not None:
+                confirm_note = f" {confirm_kind}@{confirm_level}"
             return (
-                f"{prefix}ENTRY {payload.get('type', '')} {symbol} {direction} @ {entry}"
-                f"{extra}{tf_note}{tv_line}"
+                f"{prefix}{header} {payload.get('type', '')} {symbol} {direction} @ {entry}"
+                f"{extra}{tf_note}{idx_note}{confirm_note}{tv_line}"
             )
         if kind == SignalKind.INVALIDATED:
             return f"{prefix}INVALIDATED {payload.get('type', '')} {symbol}{tv_line}"

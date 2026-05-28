@@ -39,3 +39,20 @@ def test_prepare_htfs_filters_unknown_and_empty() -> None:
 def test_config_yaml_prepare_htfs() -> None:
     cfg = load_bot_config(Path("config.yaml"))
     assert cfg.prepare_htfs() == ("4H", "1H")
+
+
+def test_entry_max_entries_per_setup_default() -> None:
+    cfg = BotConfig.model_validate(
+        {
+            "exchange": {"name": "bybit", "category": "linear"},
+            "symbols": {},
+            "timeframes": ["1H"],
+            "reversal": {},
+            "continuation": {},
+            "filters": {},
+            "risk": {},
+            "telegram": {},
+            "paper_mode": {},
+        }
+    )
+    assert cfg.entry.max_entries_per_setup == 2
