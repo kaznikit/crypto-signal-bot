@@ -551,6 +551,56 @@ def test_detect_ltf_entry_confirm_filters_direction() -> None:
         assert any_dir.direction == short_only.direction
 
 
+def test_detect_ltf_entry_confirm_ignores_stale_direction_after_opposite_break(
+    monkeypatch,
+) -> None:
+    df = _df([100.0] * 20, spread=0.05)
+    breaks = [
+        StructureBreak(
+            direction="SHORT",
+            kind="BOS",
+            swing_idx=6,
+            swing_price=99.5,
+            broken_idx=8,
+        ),
+        StructureBreak(
+            direction="LONG",
+            kind="BOS",
+            swing_idx=10,
+            swing_price=100.5,
+            broken_idx=12,
+        ),
+    ]
+
+    monkeypatch.setattr(pivmod, "extract_structure_breaks", lambda *_a, **_k: breaks)
+
+    stale_short = detect_ltf_entry_confirm(
+        df,
+        swing_size=3,
+        max_bars_ago=50,
+        use_close=True,
+        kinds=("BOS", "CHOCH"),
+        direction="SHORT",
+        lookback_mode="since_prepare",
+        since_open_ms=0,
+    )
+    assert stale_short is None
+
+    fresh_long = detect_ltf_entry_confirm(
+        df,
+        swing_size=3,
+        max_bars_ago=50,
+        use_close=True,
+        kinds=("BOS", "CHOCH"),
+        direction="LONG",
+        lookback_mode="since_prepare",
+        since_open_ms=0,
+    )
+    assert fresh_long is not None
+    assert fresh_long.direction == "LONG"
+    assert fresh_long.broken_open_ms == int(df.iloc[12]["open_time"])
+
+
 def test_detect_ltf_choch_returns_recent_choch_only() -> None:
     """LTF CHoCH-helper должен находить CHoCH не старше max_bars_ago."""
     closes = (

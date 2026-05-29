@@ -2054,6 +2054,9 @@ def detect_ltf_entry_confirm(
     ``lookback_mode``:
     - ``bars`` — только пробои не старше ``max_bars_ago`` от текущего бара;
     - ``since_prepare`` — любой пробой после ``since_open_ms`` (в пределах TTL сетапа).
+
+    Если задан ``direction``, подтверждением считается только самый свежий
+    пробой в окне: противоположный более новый пробой блокирует сигнал.
     """
     if not kinds:
         return None
@@ -2075,16 +2078,14 @@ def detect_ltf_entry_confirm(
         # hybrid — после PREPARE или в скользящем окне N баров
         return broken_idx >= since_idx or recent
 
-    candidates = [
-        b
-        for b in breaks
-        if b.kind in allowed
-        and _in_window(b.broken_idx)
-        and (direction is None or b.direction == direction)
-    ]
+    candidates = [b for b in breaks if b.kind in allowed and _in_window(b.broken_idx)]
     if not candidates:
         return None
+    # Для directional ENTRY нельзя использовать «старый» пробой в сторону сетапа,
+    # если после него уже был более свежий противоположный BOS/CHoCH.
     last = candidates[-1]
+    if direction is not None and last.direction != direction:
+        return None
     pivots = detect_pivots(df, swing_size=swing_size)
     reset_level: float | None = None
     if last.direction == "LONG":
