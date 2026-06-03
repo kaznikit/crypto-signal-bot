@@ -78,6 +78,25 @@ Pine-индикатора `Market Structure` by Leviathan** — пользова
 
 После изменения флагов перезапустите процесс бота.
 
+### Cascade ENTRY (`entry.cascade_*`)
+
+`entry.cascade_enabled: true` включает многоступенчатое подтверждение вместо
+мгновенного ENTRY по одному LTF BOS/CHoCH. Для `1H` текущая цепочка:
+
+```yaml
+entry:
+  cascade_enabled: true
+  cascade_by_htf:
+    "1H": "15M|5M|1M"
+  cascade_retrace_level: 0.5
+  cascade_confirm_structure_kinds: [BOS]
+```
+
+Логика: PREPARE на 1H уже означает касание 0.5; дальше бот ждёт BOS на 15M,
+затем откат к 0.5 этого 15M-импульса и BOS на 5M, затем откат к 0.5 5M-импульса
+и финальный BOS на 1M. Прогресс хранится в setup, поэтому перезапуск процесса не
+сбрасывает пройденные стадии.
+
 ## Тест стратегии на истории
 
 Есть **walk-forward HTF probe** для ветки разворота на **4H**.

@@ -60,6 +60,21 @@ class Repository:
                 conn.execute(text("ALTER TABLE setups ADD COLUMN last_entry_price FLOAT"))
             if "last_entry_swing_level" not in cols:
                 conn.execute(text("ALTER TABLE setups ADD COLUMN last_entry_swing_level FLOAT"))
+            if "entry_cascade_stage" not in cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE setups ADD COLUMN "
+                        "entry_cascade_stage INTEGER NOT NULL DEFAULT 0"
+                    )
+                )
+            if "entry_cascade_since_ms" not in cols:
+                conn.execute(text("ALTER TABLE setups ADD COLUMN entry_cascade_since_ms INTEGER"))
+            if "entry_cascade_touch_ms" not in cols:
+                conn.execute(text("ALTER TABLE setups ADD COLUMN entry_cascade_touch_ms INTEGER"))
+            if "entry_cascade_retrace_level" not in cols:
+                conn.execute(
+                    text("ALTER TABLE setups ADD COLUMN entry_cascade_retrace_level FLOAT")
+                )
 
     def upsert_setup(self, setup: Setup) -> None:
         with self._session_factory() as session:

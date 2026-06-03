@@ -9,6 +9,8 @@ logger = logging.getLogger(__name__)
 
 
 def _is_candle_close(now: datetime, timeframe: str) -> bool:
+    if timeframe == "1M":
+        return True
     if timeframe == "5M":
         return now.minute % 5 == 0
     if timeframe == "15M":
@@ -38,4 +40,4 @@ class TimeframeScheduler:
     @staticmethod
     def closed_timeframes(now: datetime | None = None) -> list[str]:
         current = now or datetime.now(tz=UTC)
-        return [tf for tf in ("4H", "1H", "15M", "5M") if _is_candle_close(current, tf)]
+        return [tf for tf in ("4H", "1H", "15M", "5M", "1M") if _is_candle_close(current, tf)]

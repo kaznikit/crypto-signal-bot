@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ from bot.analyzer.continuation import (
     detect_continuation_prepare,
 )
 from bot.analyzer.entry_ltf import (
+    cascade_sequence_for_htf,
     ltf_expected_for_htf,
     prepare_since_open_ms,
 )
@@ -50,6 +52,7 @@ from bot.market.pivots import (
 logger = logging.getLogger(__name__)
 
 TF_MS: dict[str, int] = {
+    "1M": 60 * 1000,
     "5M": 5 * 60 * 1000,
     "15M": 15 * 60 * 1000,
     "1H": 60 * 60 * 1000,
@@ -83,6 +86,10 @@ class ReplaySetup:
     last_entry_bar_ms: int | None = None
     last_entry_price: float | None = None
     last_entry_swing_level: float | None = None
+    entry_cascade_stage: int = 0
+    entry_cascade_since_ms: int | None = None
+    entry_cascade_touch_ms: int | None = None
+    entry_cascade_retrace_level: float | None = None
 
 
 @dataclass(slots=True)
@@ -175,10 +182,24 @@ def _load_timeframes(
             )
 
     # Safety net: replay requires at least one LTF stream for ENTRY checks.
-    if not any(tf in needed for tf in ("5M", "15M", "1H", "4H")):
+    if not any(tf in needed for tf in ("1M", "5M", "15M", "1H", "4H")):
         needed.add("5M")
 
     return tuple(sorted(needed, key=lambda tf: TF_MS[tf])), tuple(replay_targets)
+
+
+def _apply_entry_cascade_update(setup: Any, update: Any) -> None:
+    setup.entry_cascade_stage = int(update.stage)
+    setup.entry_cascade_since_ms = update.since_ms
+    setup.entry_cascade_touch_ms = update.touch_ms
+    setup.entry_cascade_retrace_level = update.retrace_level
+
+
+def _reset_entry_cascade(setup: Any) -> None:
+    setup.entry_cascade_stage = 0
+    setup.entry_cascade_since_ms = None
+    setup.entry_cascade_touch_ms = None
+    setup.entry_cascade_retrace_level = None
 
 
 def _expanded_limits_by_tf(
@@ -202,6 +223,51 @@ def _expanded_limits_by_tf(
         scaled = (limit * max_tf_ms + tf_ms - 1) // tf_ms
         out[tf] = min(MAX_EXPANDED_BARS_PER_TF, max(limit, int(scaled)))
     return out
+
+
+def _format_bybit_download_error(
+    *,
+    symbol: str,
+    needed_tfs: tuple[str, ...],
+    limit_by_tf: dict[str, int],
+    exc: Exception,
+) -> str:
+    proxy_keys = (
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "https_proxy",
+        "http_proxy",
+        "all_proxy",
+    )
+    proxy_env = [key for key in proxy_keys if os.environ.get(key)]
+    tf_limits = ", ".join(f"{tf}:{limit_by_tf[tf]}" for tf in needed_tfs)
+    lines = [
+        f"Не удалось загрузить свечи Bybit для {symbol}.",
+        f"TF/limit: {tf_limits}",
+        f"Ошибка: {type(exc).__name__}: {exc}",
+    ]
+    if "WRONG_VERSION_NUMBER" in str(exc).upper():
+        lines.extend(
+            [
+                "",
+                "SSL WRONG_VERSION_NUMBER чаще всего означает неверный proxy/VPN:",
+                "- HTTPS_PROXY/HTTP_PROXY указывает не на тот порт или схему;",
+                "- HTTPS-прокси задан как https://, хотя он принимает обычный http:// CONNECT;",
+                "- корпоративный/VPN proxy подменяет TLS или Bybit недоступен через текущую сеть.",
+            ]
+        )
+    if proxy_env:
+        lines.append("")
+        lines.append("Найдены proxy-переменные:")
+        lines.extend(f"- {key}=<set>" for key in proxy_env)
+        lines.append("")
+        lines.append("Для быстрой проверки попробуйте временно снять proxy и повторить команду:")
+        lines.append("unset HTTPS_PROXY HTTP_PROXY ALL_PROXY https_proxy http_proxy all_proxy")
+    else:
+        lines.append("")
+        lines.append("Proxy-переменные в окружении процесса не найдены.")
+    return "\n".join(lines)
 
 
 def _invalidate_armed_replay_setups_by_key(
@@ -962,7 +1028,17 @@ async def run_history_replay(
         client.fetch_klines(symbol=symbol, timeframe=tf, limit=limit_by_tf[tf])
         for tf in needed_tfs
     ]
-    candles_by_tf = await asyncio.gather(*tasks)
+    try:
+        candles_by_tf = await asyncio.gather(*tasks)
+    except Exception as exc:
+        raise SystemExit(
+            _format_bybit_download_error(
+                symbol=symbol,
+                needed_tfs=needed_tfs,
+                limit_by_tf=limit_by_tf,
+                exc=exc,
+            )
+        ) from exc
     dfs: dict[str, Any] = {}
     for tf, candles in zip(needed_tfs, candles_by_tf, strict=True):
         df = candles_to_df(candles)
@@ -1386,6 +1462,9 @@ async def run_history_replay(
                 liberal_swing_override=lib.ltf_swing_length_override if lib.enabled else None,
                 use_close=cfg.pivots.bos_use_close,
             )
+            if ltf_result.cascade_update is not None:
+                _apply_entry_cascade_update(setup, ltf_result.cascade_update)
+                funnel["entry_cascade_state_updated"] += 1
             if ltf_result.status in {"NO_MATCHING_LTF", "LTF_NOT_CLOSED"}:
                 continue
 
@@ -1411,6 +1490,16 @@ async def run_history_replay(
             if ltf_result.status == "WAITING_CONFIRM":
                 suffix = ltf_result.wait_suffix or "structure"
                 funnel[f"setup_waiting_ltf_{suffix}"] += 1
+                continue
+            if ltf_result.status == "WAITING_RETRACE":
+                suffix = ltf_result.wait_suffix or "retrace"
+                funnel[f"setup_waiting_ltf_{suffix}"] += 1
+                continue
+            if ltf_result.status == "CASCADE_ADVANCED":
+                choch = ltf_result.choch
+                if choch is not None:
+                    funnel[f"entry_cascade_{choch.kind.lower()}_{used_tf.lower()}"] += 1
+                funnel[f"entry_cascade_advanced_{used_tf.lower()}"] += 1
                 continue
 
             choch = ltf_result.choch
@@ -1504,6 +1593,8 @@ async def run_history_replay(
                 float(choch.reset_level) if choch.reset_level is not None else None
             )
             setup.state = "CONFIRMED" if setup.entry_count >= max_entries_per_setup else "ARMED"
+            if setup.state == "ARMED" and cascade_sequence_for_htf(setup.htf, cfg.entry):
+                _reset_entry_cascade(setup)
             if setup.state == "ARMED":
                 funnel["entry_sent_keep_setup_armed"] += 1
 

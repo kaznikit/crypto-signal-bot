@@ -40,6 +40,10 @@ def build_setup(
     last_entry_bar_ms: int | None = None,
     last_entry_price: float | None = None,
     last_entry_swing_level: float | None = None,
+    entry_cascade_stage: int = 0,
+    entry_cascade_since_ms: int | None = None,
+    entry_cascade_touch_ms: int | None = None,
+    entry_cascade_retrace_level: float | None = None,
 ) -> Setup:
     now = utcnow()
     return Setup(
@@ -62,6 +66,10 @@ def build_setup(
         last_entry_bar_ms=last_entry_bar_ms,
         last_entry_price=last_entry_price,
         last_entry_swing_level=last_entry_swing_level,
+        entry_cascade_stage=entry_cascade_stage,
+        entry_cascade_since_ms=entry_cascade_since_ms,
+        entry_cascade_touch_ms=entry_cascade_touch_ms,
+        entry_cascade_retrace_level=entry_cascade_retrace_level,
         created_at=now,
         updated_at=now,
         expires_at=now + timedelta(hours=ttl_hours),

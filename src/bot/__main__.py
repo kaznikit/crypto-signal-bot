@@ -8,6 +8,7 @@ from typing import Any
 
 from bot.analyzer.continuation import detect_continuation_prepare
 from bot.analyzer.entry_ltf import (
+    cascade_sequence_for_htf,
     invalidation_tf_for_setup,
     ltf_expected_for_htf,
     prepare_since_open_ms,
@@ -53,6 +54,39 @@ def _enrich_prepare_payload(
     payload["bar_open_ms"] = bar_open_ms
     payload["score"] = score
     payload["liberal"] = liberal
+
+
+def _apply_entry_cascade_update(setup: Any, update: Any) -> None:
+    setup.entry_cascade_stage = int(update.stage)
+    setup.entry_cascade_since_ms = update.since_ms
+    setup.entry_cascade_touch_ms = update.touch_ms
+    setup.entry_cascade_retrace_level = update.retrace_level
+
+
+def _reset_entry_cascade(setup: Any) -> None:
+    setup.entry_cascade_stage = 0
+    setup.entry_cascade_since_ms = None
+    setup.entry_cascade_touch_ms = None
+    setup.entry_cascade_retrace_level = None
+
+
+def _entry_tfs_for_setup(setup: Any) -> set[str]:
+    configured = {
+        tf.strip()
+        for tf in str(getattr(setup, "ltf_expected", "")).split("|")
+        if tf.strip()
+    }
+    return configured
+
+
+def _current_entry_tfs_for_setup(setup: Any, entry_cfg: Any) -> set[str]:
+    sequence = cascade_sequence_for_htf(str(setup.htf), entry_cfg)
+    if not sequence:
+        return _entry_tfs_for_setup(setup)
+    stage = int(getattr(setup, "entry_cascade_stage", 0) or 0)
+    if stage < 0 or stage >= len(sequence):
+        stage = 0
+    return {sequence[stage]}
 
 
 class SignalBotApp:
@@ -104,6 +138,10 @@ class SignalBotApp:
         closed_tfs = self._scheduler.closed_timeframes()
         if not closed_tfs:
             return
+        if set(closed_tfs) == {"1M"}:
+            active = self._repo.load_active_setups()
+            if not any("1M" in _current_entry_tfs_for_setup(setup, self._cfg.entry) for setup in active):
+                return
         symbols = await self._bybit.list_top_symbols(
             quote=self._cfg.symbols.quote,
             count=self._cfg.symbols.count,
@@ -141,19 +179,19 @@ class SignalBotApp:
         for setup in active_now:
             if setup.state != "ARMED":
                 continue
-            for tf in setup.ltf_expected.split("|"):
-                needed_tfs.add(tf.strip())
+            needed_tfs.update(_current_entry_tfs_for_setup(setup, self._cfg.entry))
             needed_tfs.add(setup.htf)
             inv_tf = invalidation_tf_for_setup(
                 setup.htf,
                 setup.ltf_expected,
                 self._cfg.entry,
-                {"4H", "1H", "15M", "5M"},
+                {"4H", "1H", "15M", "5M", "1M"},
             )
             needed_tfs.add(inv_tf)
 
-        tfs_to_fetch = set(closed_tfs) | needed_tfs
-        for tf in ("4H", "1H", "15M", "5M"):
+        prepare_htfs = self._cfg.prepare_htfs()
+        tfs_to_fetch = (set(closed_tfs) & set(prepare_htfs)) | needed_tfs
+        for tf in ("4H", "1H", "15M", "5M", "1M"):
             if tf not in tfs_to_fetch:
                 continue
             candles = await self._bybit.fetch_klines(symbol=symbol, timeframe=tf, limit=500)
@@ -166,7 +204,6 @@ class SignalBotApp:
                 self._latest_4h_series[symbol] = df
                 df_4h_for_alignment = df
 
-        prepare_htfs = self._cfg.prepare_htfs()
         # На символ допускаем только один активный PREPARE: пока setup ARMED,
         # новые PREPARE не создаём и ждём ENTRY/INVALIDATED/EXPIRED.
         if armed_keys:
@@ -519,15 +556,31 @@ class SignalBotApp:
                 ),
                 use_close=self._cfg.pivots.bos_use_close,
             )
+            if ltf_result.cascade_update is not None:
+                _apply_entry_cascade_update(setup, ltf_result.cascade_update)
+                setup.updated_at = utcnow()
+                self._repo.upsert_setup(setup)
+                funnel["entry_cascade_state_updated"] += 1
             if ltf_result.status == "NO_MATCHING_LTF":
                 funnel["active_setup_no_matching_ltf"] += 1
                 continue
             if ltf_result.status == "LTF_NOT_CLOSED":
                 funnel["active_setup_ltf_bar_not_closed"] += 1
                 continue
+            if ltf_result.status == "WAITING_RETRACE":
+                suffix = ltf_result.wait_suffix or "retrace"
+                funnel[f"setup_waiting_ltf_{suffix}"] += 1
+                continue
             if ltf_result.status == "WAITING_CONFIRM":
                 suffix = ltf_result.wait_suffix or "structure"
                 funnel[f"setup_waiting_ltf_{suffix}"] += 1
+                continue
+            if ltf_result.status == "CASCADE_ADVANCED":
+                used_tf = ltf_result.used_tf or "unknown"
+                choch = ltf_result.choch
+                if choch is not None:
+                    funnel[f"entry_cascade_{choch.kind.lower()}_{used_tf.lower()}"] += 1
+                funnel[f"entry_cascade_advanced_{used_tf.lower()}"] += 1
                 continue
 
             used_tf = ltf_result.used_tf
@@ -656,6 +709,8 @@ class SignalBotApp:
                 setup.state = (
                     "CONFIRMED" if int(setup.entry_count) >= max_entries_per_setup else "ARMED"
                 )
+                if setup.state == "ARMED" and cascade_sequence_for_htf(setup.htf, self._cfg.entry):
+                    _reset_entry_cascade(setup)
                 setup.updated_at = utcnow()
                 self._repo.upsert_setup(setup)
                 if setup.state == "ARMED":

@@ -12,7 +12,7 @@ from bot.util.time import utcnow
 
 logger = logging.getLogger(__name__)
 
-TV_INTERVAL_MAP: dict[str, str] = {"5M": "5", "15M": "15", "1H": "60", "4H": "240"}
+TV_INTERVAL_MAP: dict[str, str] = {"1M": "1", "5M": "5", "15M": "15", "1H": "60", "4H": "240"}
 
 Payload = dict[str, Any]
 

@@ -1,19 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from pybit.unified_trading import HTTP
 
-INTERVAL_MAP: dict[str, str] = {"5M": "5", "15M": "15", "1H": "60", "4H": "240"}
+INTERVAL_MAP: dict[str, str] = {"1M": "1", "5M": "5", "15M": "15", "1H": "60", "4H": "240"}
 INTERVAL_MS_MAP: dict[str, int] = {
+    "1M": 60 * 1000,
     "5M": 5 * 60 * 1000,
     "15M": 15 * 60 * 1000,
     "1H": 60 * 60 * 1000,
     "4H": 4 * 60 * 60 * 1000,
 }
+
+PROXY_ENV_KEYS: tuple[str, ...] = (
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "ALL_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "all_proxy",
+)
 
 
 def _now_utc_ms() -> int:
@@ -41,10 +53,41 @@ class BybitClient:
         self._category = category
         self._http = HTTP(api_key=api_key, api_secret=api_secret, testnet=False)
         self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._disabled_env_proxy_retry = False
+
+    @staticmethod
+    def _wrong_ssl_version(exc: Exception) -> bool:
+        return "WRONG_VERSION_NUMBER" in str(exc).upper()
+
+    @staticmethod
+    def _proxy_env_present() -> bool:
+        return any(os.environ.get(key) for key in PROXY_ENV_KEYS)
+
+    def _disable_env_proxy_for_retry(self) -> bool:
+        client = getattr(self._http, "client", None)
+        if client is None or self._disabled_env_proxy_retry:
+            return False
+        if not getattr(client, "trust_env", True):
+            return False
+        client.trust_env = False
+        self._disabled_env_proxy_retry = True
+        return True
+
+    async def _call_http(self, fn: Callable[..., dict[str, Any]], **kwargs: Any) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(fn, **kwargs)
+        except Exception as exc:
+            if (
+                self._wrong_ssl_version(exc)
+                and self._proxy_env_present()
+                and self._disable_env_proxy_for_retry()
+            ):
+                return await asyncio.to_thread(fn, **kwargs)
+            raise
 
     async def list_top_symbols(self, quote: str, count: int) -> list[str]:
         async with self._semaphore:
-            payload: dict[str, Any] = await asyncio.to_thread(
+            payload: dict[str, Any] = await self._call_http(
                 self._http.get_tickers,
                 category=self._category,
             )
@@ -74,7 +117,7 @@ class BybitClient:
                 req_kwargs["end"] = end
 
             async with self._semaphore:
-                payload: dict[str, Any] = await asyncio.to_thread(
+                payload: dict[str, Any] = await self._call_http(
                     self._http.get_kline,
                     **req_kwargs,
                 )

@@ -39,7 +39,7 @@ def _find_config_path() -> Path:
 
 
 def _tv_link(symbol: str, tf: str, exchange: str = "BYBIT") -> str:
-    interval_map = {"5M": "5", "15M": "15", "1H": "60", "4H": "240"}
+    interval_map = {"1M": "1", "5M": "5", "15M": "15", "1H": "60", "4H": "240"}
     interval = interval_map.get(tf, "240")
     return f"https://www.tradingview.com/chart/?symbol={exchange}:{symbol}&interval={interval}"
 

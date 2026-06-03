@@ -57,6 +57,14 @@ class Setup(Base):
     last_entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Reset-swing уровень (LTF) для re-entry: LONG -> прошлый LOW, SHORT -> прошлый HIGH.
     last_entry_swing_level: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Прогресс каскадного ENTRY: stage указывает текущий TF в цепочке.
+    entry_cascade_stage: Mapped[int] = mapped_column(Integer, default=0)
+    # open_time предыдущего BOS в каскаде, после которого ждём retrace 0.5.
+    entry_cascade_since_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # open_time бара касания 0.5 перед текущим TF-подтверждением.
+    entry_cascade_touch_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Уровень 0.5 предыдущего TF-импульса.
+    entry_cascade_retrace_level: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

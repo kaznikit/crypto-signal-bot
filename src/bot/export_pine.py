@@ -338,7 +338,7 @@ def run_export_from_replay(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export bot signals to Pine Script overlay")
     parser.add_argument("--symbol", required=True, help="e.g. BTCUSDT")
-    parser.add_argument("--tf", default=None, help="Filter by HTF (4H, 1H, 15M, 5M)")
+    parser.add_argument("--tf", default=None, help="Filter by TF (4H, 1H, 15M, 5M, 1M)")
     parser.add_argument("--since", default=None, help="UTC date YYYY-MM-DD")
     parser.add_argument(
         "--kinds",

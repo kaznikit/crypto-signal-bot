@@ -73,6 +73,7 @@ class PivotsConfig(BaseModel):
 
     swing_size_by_tf: dict[str, int] = Field(
         default_factory=lambda: {
+            "1M": 5,
             "5M": 10,
             "15M": 10,
             "1H": 12,
@@ -102,12 +103,12 @@ class EntryConfig(BaseModel):
     # при ltf_by_htf "5M" инвалидация на 5M убивает сетап до ENTRY.
     invalidation_ltf_by_htf: dict[str, str] = Field(default_factory=dict)
     ltf_swing_length: dict[str, int] = Field(
-        default_factory=lambda: {"5M": 5, "15M": 8, "1H": 12, "4H": 20}
+        default_factory=lambda: {"1M": 4, "5M": 5, "15M": 8, "1H": 12, "4H": 20}
     )
     ltf_max_bars_ago: int = 24
     # Окно свежести LTF BOS/CHoCH по TF (перекрывает ltf_max_bars_ago для указанных TF).
     ltf_max_bars_ago_by_tf: dict[str, int] = Field(
-        default_factory=lambda: {"5M": 48, "15M": 36, "1H": 18}
+        default_factory=lambda: {"1M": 120, "5M": 48, "15M": 36, "1H": 18}
     )
     # False: ENTRY без SL/TP в payload и без фильтра min_rr (только цена + CHoCH).
     compute_sl_tp: bool = True
@@ -123,6 +124,12 @@ class EntryConfig(BaseModel):
     ltf_swing_use_pivot_sizes: bool = False
     # Максимум ENTRY-сигналов на один setup, пока он остаётся валидным.
     max_entries_per_setup: int = 2
+    # Каскадный ENTRY: после PREPARE на HTF подтверждение идёт по цепочке
+    # TF, например 1H -> 15M BOS -> retrace 0.5 -> 5M BOS -> retrace 0.5 -> 1M BOS.
+    cascade_enabled: bool = False
+    cascade_by_htf: dict[str, str] = Field(default_factory=lambda: {"1H": "15M|5M|1M"})
+    cascade_retrace_level: float = 0.5
+    cascade_confirm_structure_kinds: list[str] = Field(default_factory=lambda: ["BOS"])
 
 
 class FiltersConfig(BaseModel):
@@ -152,7 +159,7 @@ class LiberalConfig(BaseModel):
     # ретрейс к OTE успел дойти до зоны даже после длинного бокового движения).
     max_bars_ago_4h: int = 50
     ltf_swing_length_override: dict[str, int] = Field(
-        default_factory=lambda: {"5M": 5, "15M": 8, "1H": 10}
+        default_factory=lambda: {"1M": 3, "5M": 5, "15M": 8, "1H": 10}
     )
 
 
