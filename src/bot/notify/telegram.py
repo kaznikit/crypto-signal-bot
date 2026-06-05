@@ -28,6 +28,11 @@ class TelegramNotifier:
         self._chat_id = chat_id
         self._paper_chat_id = paper_chat_id
 
+    def _target_chat(self, paper_mode: bool, liberal_paper_only: bool = False) -> str | None:
+        if liberal_paper_only:
+            return self._paper_chat_id
+        return self._paper_chat_id if paper_mode and self._paper_chat_id else self._chat_id
+
     @staticmethod
     def build_signal_id(setup_id: str, kind: str, close_time: int) -> str:
         raw = f"{setup_id}:{kind}:{close_time}"
@@ -46,15 +51,13 @@ class TelegramNotifier:
         liberal = bool(payload.get("liberal")) or liberal_paper_only
         message = self._format_message(kind=kind, payload=payload, liberal=liberal)
 
-        if liberal_paper_only:
-            if not self._paper_chat_id:
-                logger.warning("Liberal-only signal skipped: TG_PAPER_CHAT_ID is not set")
-                return None
-            target_chat = self._paper_chat_id
-        else:
-            target_chat = (
-                self._paper_chat_id if paper_mode and self._paper_chat_id else self._chat_id
-            )
+        target_chat = self._target_chat(
+            paper_mode=paper_mode,
+            liberal_paper_only=liberal_paper_only,
+        )
+        if target_chat is None:
+            logger.warning("Liberal-only signal skipped: TG_PAPER_CHAT_ID is not set")
+            return None
 
         await self._bot.send_message(
             chat_id=target_chat,
@@ -67,6 +70,14 @@ class TelegramNotifier:
             kind=kind.value,
             payload_json=json.dumps(payload, ensure_ascii=True),
             sent_at=utcnow(),
+        )
+
+    async def send_entry_stats(self, text: str, paper_mode: bool = False) -> None:
+        target_chat = self._target_chat(paper_mode=paper_mode)
+        await self._bot.send_message(
+            chat_id=target_chat,
+            text=text,
+            disable_web_page_preview=True,
         )
 
     def _tv_link_for_payload(self, payload: Payload) -> str | None:
@@ -83,49 +94,31 @@ class TelegramNotifier:
         tv = self._tv_link_for_payload(payload)
         tv_line = f"\nTV: {tv}" if tv else ""
         if kind == SignalKind.PREPARE:
-            ote = f"{payload.get('ote_low')}-{payload.get('ote_high')}"
+            is_reentry = bool(payload.get("is_reentry", False))
             return (
-                f"{prefix}PREPARE {payload.get('type', '')} {symbol} {direction}\n"
-                f"origin={payload.get('origin_price')} ote={ote}\n"
-                f"invalid={payload.get('invalidation_price')} "
-                f"score={payload.get('score', 0)}{tv_line}"
+                f"{prefix}PREPARE\n"
+                f"{symbol}\n"
+                f"{direction}\n"
+                f"invalidate {payload.get('invalidation_price')}\n"
+                f"isReentry {str(is_reentry).lower()}\n"
+                f"Score {payload.get('score', 0)}{tv_line}"
             )
         if kind == SignalKind.ENTRY:
-            entry = payload.get("entry", payload.get("origin_price"))
-            sl = payload.get("sl")
-            tp = payload.get("tp1")
-            extra = f" SL={sl} TP1={tp}" if sl is not None and tp is not None else ""
-            entry_tf = payload.get("entry_ltf") or payload.get("htf")
-            setup_tf = payload.get("setup_htf", "")
-            tf_note = f" confirm={entry_tf} setup={setup_tf}" if entry_tf else ""
             entry_idx = payload.get("entry_index")
-            entries_max = payload.get("entries_max")
             idx_num: int | None = None
             if entry_idx is not None:
                 try:
                     idx_num = int(entry_idx)
                 except (TypeError, ValueError):
                     idx_num = None
-            header = "ENTRY"
-            if idx_num == 1:
-                header = "ENTRY-1 [PRIMARY]"
-            elif idx_num == 2:
-                header = "ENTRY-2 [RE-ENTRY]"
-            elif idx_num is not None and idx_num > 2:
-                header = f"ENTRY-{idx_num} [ADD-ON]"
-            idx_note = (
-                f" entry#{entry_idx}/{entries_max}"
-                if entry_idx is not None and entries_max is not None
-                else ""
-            )
-            confirm_kind = payload.get("confirm_kind")
-            confirm_level = payload.get("confirm_level")
-            confirm_note = ""
-            if confirm_kind and confirm_level is not None:
-                confirm_note = f" {confirm_kind}@{confirm_level}"
+            is_reentry = bool(idx_num is not None and idx_num > 1)
             return (
-                f"{prefix}{header} {payload.get('type', '')} {symbol} {direction} @ {entry}"
-                f"{extra}{tf_note}{idx_note}{confirm_note}{tv_line}"
+                f"{prefix}ENTRY\n"
+                f"{symbol}\n"
+                f"{direction}\n"
+                f"invalidate {payload.get('invalidation_price')}\n"
+                f"isReentry {str(is_reentry).lower()}\n"
+                f"Score {payload.get('score', 0)}{tv_line}"
             )
         if kind == SignalKind.INVALIDATED:
             return f"{prefix}INVALIDATED {payload.get('type', '')} {symbol}{tv_line}"

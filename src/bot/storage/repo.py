@@ -136,3 +136,6 @@ class Repository:
                 select(Signal).where(Signal.kind.in_(kinds)).order_by(Signal.sent_at)
             ).all()
             return list(rows)
+
+    def load_signals_by_kind(self, kinds: tuple[str, ...]) -> list[Signal]:
+        return self.load_signals_for_export(kinds=kinds)

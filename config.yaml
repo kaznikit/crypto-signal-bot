@@ -50,7 +50,7 @@ entry:
   confirm_structure_kinds: [CHOCH, BOS]
   structure_lookback: since_prepare
   confirm_mode: structure_break
-  cascade_enabled: true
+  cascade_enabled: false
   cascade_by_htf:
     "1H": "5M|1M"
   cascade_confirm_structure_kinds: [BOS, CHOCH]
@@ -62,6 +62,7 @@ risk:
   tp_r_multiples: [2, 3]
 telegram:
   chat_id_env: TG_CHAT_ID
+  send_prepare_signals: false
 paper_mode:
   enabled: true
   paper_chat_id_env: TG_PAPER_CHAT_ID
@@ -80,6 +81,9 @@ paper_mode:
       "1H": 10
 history_replay:
   max_expanded_bars_per_tf: 60000
+entry_stats:
+  enabled: true
+  check_interval_hours: 12
 strategy_features:
   require_liquidity_grab_reversal: false
   quality_score_enabled: true

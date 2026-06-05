@@ -148,6 +148,7 @@ class RiskConfig(BaseModel):
 
 class TelegramConfig(BaseModel):
     chat_id_env: str = "TG_CHAT_ID"
+    send_prepare_signals: bool = True
 
 
 class LiberalConfig(BaseModel):
@@ -178,6 +179,11 @@ class HistoryReplayConfig(BaseModel):
     # Для каскада 1H -> 15M -> 5M -> 1M нужен глубокий 1M-ряд:
     # 1000 свечей 1H = до 60000 свечей 1M.
     max_expanded_bars_per_tf: int = 4_000
+
+
+class EntryStatsConfig(BaseModel):
+    enabled: bool = True
+    check_interval_hours: int = 24
 
 
 class StrategyFeaturesConfig(BaseModel):
@@ -217,6 +223,7 @@ class BotConfig(BaseModel):
     telegram: TelegramConfig
     paper_mode: PaperModeConfig
     history_replay: HistoryReplayConfig = Field(default_factory=HistoryReplayConfig)
+    entry_stats: EntryStatsConfig = Field(default_factory=EntryStatsConfig)
     strategy_features: StrategyFeaturesConfig = Field(default_factory=StrategyFeaturesConfig)
 
     def prepare_htfs(self) -> tuple[str, ...]:

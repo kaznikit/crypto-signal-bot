@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,8 +22,10 @@ from bot.analyzer.reentry import (
     reentry_swing_reset_reached,
 )
 from bot.analyzer.reversal import detect_reversal_prepare
-from bot.analyzer.setup_lifecycle import decide_setup_structure_transition
-from bot.analyzer.setup_lifecycle import apply_reset_after_first_entry_policy
+from bot.analyzer.setup_lifecycle import (
+    apply_reset_after_first_entry_policy,
+    decide_setup_structure_transition,
+)
 from bot.analyzer.setup_machine import tick_setup
 from bot.analyzer.setup_runtime import check_price_invalidation, resolve_ltf_confirmation
 from bot.analyzer.strategy_gates import (
@@ -31,17 +35,26 @@ from bot.analyzer.strategy_gates import (
     evaluate_reversal_prepare_liberal,
 )
 from bot.config import EnvConfig, load_bot_config
-from bot.exchange.bybit_client import BybitClient
+from bot.entry_stats import (
+    build_entry_stats_candidates,
+    evaluate_entry_stats_candidate,
+    format_entry_stats_message,
+    prepare_payloads_by_setup,
+)
+from bot.exchange.bybit_client import INTERVAL_MS_MAP, BybitClient
 from bot.market.candles import candles_to_df
 from bot.market.pivots import extract_structure_breaks_htf
 from bot.notify.telegram import TelegramNotifier
 from bot.scheduler import TimeframeScheduler
-from bot.storage.models import SignalKind
+from bot.storage.models import Signal, SignalKind
 from bot.storage.repo import Repository
 from bot.util.logging import setup_logging
-from bot.util.time import utcnow
+from bot.util.time import ensure_utc, utcnow
 
 logger = logging.getLogger(__name__)
+
+ENTRY_STATS_LAST_RUN_KEY = "entry_stats_last_run"
+ENTRY_STATS_PROCESSED_KEY = "entry_stats_processed"
 
 
 def _enrich_prepare_payload(
@@ -137,12 +150,16 @@ class SignalBotApp:
             await asyncio.sleep(3600)
 
     async def tick(self) -> None:
+        await self._maybe_process_entry_stats()
         closed_tfs = self._scheduler.closed_timeframes()
         if not closed_tfs:
             return
         if set(closed_tfs) == {"1M"}:
             active = self._repo.load_active_setups()
-            if not any("1M" in _current_entry_tfs_for_setup(setup, self._cfg.entry) for setup in active):
+            if not any(
+                "1M" in _current_entry_tfs_for_setup(setup, self._cfg.entry)
+                for setup in active
+            ):
                 return
         symbols = await self._bybit.list_top_symbols(
             quote=self._cfg.symbols.quote,
@@ -160,6 +177,93 @@ class SignalBotApp:
             )
         if utcnow().hour == 0 and utcnow().minute < 2:
             await self._notifier.send_heartbeat(paper_mode=self._cfg.paper_mode.enabled)
+
+    async def _send_prepare_event(
+        self,
+        *,
+        payload: dict[str, Any],
+        close_time: int,
+        liberal_paper_only: bool = False,
+    ) -> Any:
+        if not self._cfg.telegram.send_prepare_signals:
+            setup_id = str(payload.get("setup_id", "system"))
+            return Signal(
+                id=TelegramNotifier.build_signal_id(setup_id, SignalKind.PREPARE.value, close_time),
+                setup_id=setup_id,
+                kind=SignalKind.PREPARE.value,
+                payload_json=json.dumps(payload, ensure_ascii=True),
+                sent_at=utcnow(),
+            )
+        return await self._notifier.send_event(
+            kind=SignalKind.PREPARE,
+            payload=payload,
+            close_time=close_time,
+            paper_mode=self._cfg.paper_mode.enabled,
+            liberal_paper_only=liberal_paper_only,
+        )
+
+    async def _maybe_process_entry_stats(self) -> None:
+        stats_cfg = self._cfg.entry_stats
+        if not stats_cfg.enabled:
+            return
+        interval = timedelta(hours=max(1, int(stats_cfg.check_interval_hours)))
+        state = self._repo.get_state_value(ENTRY_STATS_LAST_RUN_KEY)
+        now = utcnow()
+        if state and state.get("last_run"):
+            last_run = now
+            try:
+                last_run = ensure_utc(datetime.fromisoformat(state["last_run"]))
+            except ValueError:
+                last_run = now - interval
+            if now - last_run < interval:
+                return
+
+        try:
+            results = await self._collect_entry_stats()
+        except Exception:
+            logger.exception("Entry stats processing failed")
+            self._repo.set_state_value(ENTRY_STATS_LAST_RUN_KEY, {"last_run": now.isoformat()})
+            return
+        if results:
+            message = format_entry_stats_message(results)
+            await self._notifier.send_entry_stats(
+                message,
+                paper_mode=self._cfg.paper_mode.enabled,
+            )
+            processed = self._repo.get_state_value(ENTRY_STATS_PROCESSED_KEY) or {}
+            for result in results:
+                processed[result.signal_id] = result.status
+            self._repo.set_state_value(ENTRY_STATS_PROCESSED_KEY, processed)
+            logger.info("Entry stats sent | count=%s", len(results))
+        self._repo.set_state_value(ENTRY_STATS_LAST_RUN_KEY, {"last_run": now.isoformat()})
+
+    async def _collect_entry_stats(self) -> list[Any]:
+        all_signals = self._repo.load_signals_by_kind(("PREPARE", "ENTRY"))
+        processed = self._repo.get_state_value(ENTRY_STATS_PROCESSED_KEY) or {}
+        prepares = prepare_payloads_by_setup(all_signals)
+        entries = [signal for signal in all_signals if signal.kind == "ENTRY"]
+        candidates = build_entry_stats_candidates(
+            entries,
+            prepares,
+            set(processed.keys()),
+        )
+        results: list[Any] = []
+        now_ms = int(utcnow().timestamp() * 1000)
+        for candidate in candidates:
+            timeframe = candidate.timeframe if candidate.timeframe in INTERVAL_MS_MAP else "5M"
+            tf_ms = INTERVAL_MS_MAP[timeframe]
+            limit = max(2, int((now_ms - candidate.entry_open_ms) / tf_ms) + 5)
+            candles = await self._bybit.fetch_klines(
+                symbol=candidate.symbol,
+                timeframe=timeframe,
+                limit=limit,
+            )
+            result = evaluate_entry_stats_candidate(candidate, candles)
+            if result is not None:
+                results.append(result)
+            await asyncio.sleep(0.03)
+        results.sort(key=lambda result: result.outcome_open_ms)
+        return results
 
     async def _process_symbol(self, symbol: str, closed_tfs: list[str]) -> Counter[str]:
         funnel: Counter[str] = Counter()
@@ -320,11 +424,9 @@ class SignalBotApp:
                 liberal=False,
             )
             self._repo.upsert_setup(setup)
-            signal_row = await self._notifier.send_event(
-                kind=SignalKind.PREPARE,
+            signal_row = await self._send_prepare_event(
                 payload=event.payload,
                 close_time=bar_open_ms,
-                paper_mode=self._cfg.paper_mode.enabled,
             )
             if signal_row is not None:
                 self._repo.save_signal(signal_row)
@@ -354,11 +456,9 @@ class SignalBotApp:
                     liberal=True,
                 )
                 self._repo.upsert_setup(setup)
-                signal_row = await self._notifier.send_event(
-                    kind=SignalKind.PREPARE,
+                signal_row = await self._send_prepare_event(
                     payload=event.payload,
                     close_time=bar_open_ms,
-                    paper_mode=self._cfg.paper_mode.enabled,
                     liberal_paper_only=True,
                 )
                 if signal_row is not None:
@@ -431,11 +531,9 @@ class SignalBotApp:
                 liberal=False,
             )
             self._repo.upsert_setup(setup)
-            signal_row = await self._notifier.send_event(
-                kind=SignalKind.PREPARE,
+            signal_row = await self._send_prepare_event(
                 payload=event.payload,
                 close_time=bar_open_ms,
-                paper_mode=self._cfg.paper_mode.enabled,
             )
             if signal_row is not None:
                 self._repo.save_signal(signal_row)
@@ -465,11 +563,9 @@ class SignalBotApp:
                     liberal=True,
                 )
                 self._repo.upsert_setup(setup)
-                signal_row = await self._notifier.send_event(
-                    kind=SignalKind.PREPARE,
+                signal_row = await self._send_prepare_event(
                     payload=event.payload,
                     close_time=bar_open_ms,
-                    paper_mode=self._cfg.paper_mode.enabled,
                     liberal_paper_only=True,
                 )
                 if signal_row is not None:
@@ -617,6 +713,8 @@ class SignalBotApp:
             payload["bar_open_ms"] = bar_open_ms
             payload["ote_low"] = setup.ote_low
             payload["ote_high"] = setup.ote_high
+            payload["invalidation_price"] = setup.invalidation_price
+            payload["score"] = setup.score
             payload["liberal"] = setup.is_liberal
             payload["confirm_kind"] = str(choch.kind)
             payload["confirm_level"] = float(choch.level)
@@ -626,7 +724,10 @@ class SignalBotApp:
 
             if event.kind == "ENTRY":
                 payload["entry"] = float(row["close"])
-                if setup.last_entry_bar_ms is not None and int(setup.last_entry_bar_ms) == bar_open_ms:
+                if (
+                    setup.last_entry_bar_ms is not None
+                    and int(setup.last_entry_bar_ms) == bar_open_ms
+                ):
                     funnel["entry_skipped_duplicate_bar"] += 1
                     continue
                 if int(setup.entry_count or 0) >= max_entries_per_setup:
