@@ -38,7 +38,7 @@ from bot.config import EnvConfig, load_bot_config
 from bot.entry_stats import (
     build_entry_stats_candidates,
     evaluate_entry_stats_candidate,
-    format_entry_stats_message,
+    format_entry_stats_messages,
     prepare_payloads_by_setup,
 )
 from bot.exchange.bybit_client import INTERVAL_MS_MAP, BybitClient
@@ -225,11 +225,19 @@ class SignalBotApp:
             self._repo.set_state_value(ENTRY_STATS_LAST_RUN_KEY, {"last_run": now.isoformat()})
             return
         if results:
-            message = format_entry_stats_message(results)
-            await self._notifier.send_entry_stats(
-                message,
-                paper_mode=self._cfg.paper_mode.enabled,
-            )
+            try:
+                for message in format_entry_stats_messages(results):
+                    await self._notifier.send_entry_stats(
+                        message,
+                        paper_mode=self._cfg.paper_mode.enabled,
+                    )
+            except Exception:
+                logger.exception("Entry stats notification failed")
+                self._repo.set_state_value(
+                    ENTRY_STATS_LAST_RUN_KEY,
+                    {"last_run": now.isoformat()},
+                )
+                return
             processed = self._repo.get_state_value(ENTRY_STATS_PROCESSED_KEY) or {}
             for result in results:
                 processed[result.signal_id] = result.status
@@ -247,6 +255,7 @@ class SignalBotApp:
             prepares,
             set(processed.keys()),
         )
+        candidates = candidates[: max(1, int(self._cfg.entry_stats.max_candidates_per_run))]
         results: list[Any] = []
         now_ms = int(utcnow().timestamp() * 1000)
         for candidate in candidates:

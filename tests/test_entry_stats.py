@@ -3,9 +3,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from bot.entry_stats import (
+    EntryStatsResult,
     build_entry_stats_candidates,
     evaluate_entry_stats_candidate,
     format_entry_stats_message,
+    format_entry_stats_messages,
     prepare_payloads_by_setup,
 )
 from bot.storage.models import Signal
@@ -166,3 +168,25 @@ def test_entry_stats_message_contains_summary_and_table() -> None:
     assert "✅ BTCUSDT LONG" in message
     assert "Symbol" in message
     assert "BTCUSDT" in message
+
+
+def test_entry_stats_messages_are_split_under_limit() -> None:
+    results = [
+        EntryStatsResult(
+            signal_id=f"entry-{idx}",
+            symbol=f"LONGSYMBOL{idx:03d}USDT",
+            direction="LONG",
+            status="SUCCESS",
+            entry_price=100,
+            target_price=110,
+            invalidation_price=95,
+            extreme_price=111,
+            outcome_open_ms=2_000,
+        )
+        for idx in range(80)
+    ]
+
+    messages = format_entry_stats_messages(results, max_message_len=800)
+
+    assert len(messages) > 1
+    assert all(len(message) <= 800 for message in messages)

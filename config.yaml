@@ -84,6 +84,7 @@ history_replay:
 entry_stats:
   enabled: true
   check_interval_hours: 12
+  max_candidates_per_run: 25
 strategy_features:
   require_liquidity_grab_reversal: false
   quality_score_enabled: true

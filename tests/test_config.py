@@ -42,15 +42,16 @@ def test_config_yaml_prepare_htfs() -> None:
     assert cfg.prepare_htfs() == ("4H", "1H")
 
 
-def test_config_yaml_entry_cascade_enabled_for_1h() -> None:
+def test_config_yaml_entry_cascade_settings_for_1h() -> None:
     cfg = load_bot_config(Path("config.yaml"))
 
-    assert cfg.entry.cascade_enabled is True
+    assert cfg.entry.cascade_enabled is False
     assert cfg.entry.cascade_by_htf["1H"] == "5M|1M"
     assert cfg.entry.cascade_confirm_structure_kinds == ["BOS", "CHOCH"]
-    assert cfg.telegram.send_prepare_signals is True
+    assert cfg.telegram.send_prepare_signals is False
     assert cfg.history_replay.max_expanded_bars_per_tf == 60_000
-    assert cfg.entry_stats.check_interval_hours == 24
+    assert cfg.entry_stats.check_interval_hours == 12
+    assert cfg.entry_stats.max_candidates_per_run == 25
 
 
 def test_entry_max_entries_per_setup_default() -> None:
@@ -70,3 +71,4 @@ def test_entry_max_entries_per_setup_default() -> None:
     assert cfg.entry.max_entries_per_setup == 2
     assert cfg.telegram.send_prepare_signals is True
     assert cfg.entry_stats.check_interval_hours == 24
+    assert cfg.entry_stats.max_candidates_per_run == 25

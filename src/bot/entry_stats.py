@@ -9,6 +9,7 @@ from bot.storage.models import Signal
 
 GREEN_CHECK_SIGN = "✅"
 RED_CANCEL_SIGN = "❌"
+TELEGRAM_SAFE_MESSAGE_LEN = 3500
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +204,13 @@ def evaluate_entry_stats_candidate(
 
 
 def format_entry_stats_message(results: list[EntryStatsResult]) -> str:
+    return "\n\n".join(format_entry_stats_messages(results))
+
+
+def format_entry_stats_messages(
+    results: list[EntryStatsResult],
+    max_message_len: int = TELEGRAM_SAFE_MESSAGE_LEN,
+) -> list[str]:
     summary_lines = []
     for result in results:
         sign = GREEN_CHECK_SIGN if result.status == "SUCCESS" else RED_CANCEL_SIGN
@@ -225,7 +233,18 @@ def format_entry_stats_message(results: list[EntryStatsResult]) -> str:
         ["Symbol", "Side", "Result", "Entry", "Target", "Invalid", "Extreme", "Time"],
         rows,
     )
-    return "\n".join([*summary_lines, "", "Trades:", *table])
+    chunks: list[str] = []
+    current: list[str] = []
+    for line in [*summary_lines, "", "Trades:", *table]:
+        candidate = "\n".join([*current, line]) if current else line
+        if current and len(candidate) > max_message_len:
+            chunks.append("\n".join(current))
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
 
 
 def _format_ms(value: int) -> str:

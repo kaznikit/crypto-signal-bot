@@ -184,6 +184,7 @@ class HistoryReplayConfig(BaseModel):
 class EntryStatsConfig(BaseModel):
     enabled: bool = True
     check_interval_hours: int = 24
+    max_candidates_per_run: int = 25
 
 
 class StrategyFeaturesConfig(BaseModel):
