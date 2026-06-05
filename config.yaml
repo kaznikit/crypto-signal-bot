@@ -1,6 +1,8 @@
 exchange:
   name: bybit
   category: linear
+  domain: bytick
+  tld: com
 symbols:
   mode: top_by_volume
   count: 50
@@ -50,9 +52,8 @@ entry:
   confirm_mode: structure_break
   cascade_enabled: true
   cascade_by_htf:
-    "1H": "15M|5M|1M"
-  cascade_retrace_level: 0.5
-  cascade_confirm_structure_kinds: [BOS]
+    "1H": "5M|1M"
+  cascade_confirm_structure_kinds: [BOS, CHOCH]
 filters:
   min_atr_pct: 0.3
   min_rr: 1.5
@@ -77,6 +78,8 @@ paper_mode:
       "5M": 5
       "15M": 8
       "1H": 10
+history_replay:
+  max_expanded_bars_per_tf: 60000
 strategy_features:
   require_liquidity_grab_reversal: false
   quality_score_enabled: true

@@ -9,7 +9,13 @@ from typing import Any
 
 from pybit.unified_trading import HTTP
 
-INTERVAL_MAP: dict[str, str] = {"1M": "1", "5M": "5", "15M": "15", "1H": "60", "4H": "240"}
+INTERVAL_MAP: dict[str, str] = {
+    "1M": "1",
+    "5M": "5",
+    "15M": "15",
+    "1H": "60",
+    "4H": "240",
+}
 INTERVAL_MS_MAP: dict[str, int] = {
     "1M": 60 * 1000,
     "5M": 5 * 60 * 1000,
@@ -49,9 +55,17 @@ class BybitClient:
         api_key: str | None = None,
         api_secret: str | None = None,
         max_concurrency: int = 5,
+        domain: str = "bybit",
+        tld: str = "com",
     ) -> None:
         self._category = category
-        self._http = HTTP(api_key=api_key, api_secret=api_secret, testnet=False)
+        self._http = HTTP(
+            api_key=api_key,
+            api_secret=api_secret,
+            testnet=False,
+            domain=domain,
+            tld=tld,
+        )
         self._semaphore = asyncio.Semaphore(max_concurrency)
         self._disabled_env_proxy_retry = False
 
@@ -96,7 +110,13 @@ class BybitClient:
         filtered.sort(key=lambda row: float(row.get("turnover24h", "0")), reverse=True)
         return [item["symbol"] for item in filtered[:count]]
 
-    async def fetch_klines(self, symbol: str, timeframe: str, limit: int = 500) -> list[Candle]:
+    async def fetch_klines(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int = 500,
+        progress: Callable[[str, int, int], None] | None = None,
+    ) -> list[Candle]:
         interval = INTERVAL_MAP[timeframe]
         if limit <= 0:
             return []
@@ -127,6 +147,8 @@ class BybitClient:
                 break
             all_rows.extend(rows)
             remaining -= len(rows)
+            if progress is not None:
+                progress(timeframe, min(limit, limit - remaining), limit)
 
             oldest_open_time = min(int(r[0]) for r in rows)
             end = oldest_open_time - 1

@@ -61,6 +61,8 @@ async def run_reversal_probe(
         category=cfg.exchange.category,
         api_key=env.bybit_api_key,
         api_secret=env.bybit_api_secret,
+        domain=cfg.exchange.domain,
+        tld=cfg.exchange.tld,
     )
     candles = await client.fetch_klines(symbol=symbol, timeframe="4H", limit=limit)
     df = candles_to_df(candles)

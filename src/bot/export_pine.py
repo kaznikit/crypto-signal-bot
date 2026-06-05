@@ -295,6 +295,7 @@ def run_export_from_replay(
     limit: int,
     mode: str,
     max_markers: int,
+    max_expanded_bars_per_tf: int | None,
 ) -> None:
     focus_htf = tf if tf in {"4H", "1H", "15M"} else None
     events: list[dict[str, Any]] = []
@@ -308,6 +309,9 @@ def run_export_from_replay(
             events_out=events,
             quiet=True,
             focus_htf=focus_htf,
+            progress=True,
+            overlay_tfs={tf} if tf else None,
+            max_expanded_bars_per_tf=max_expanded_bars_per_tf,
         )
     )
     print(f"Replay produced {len(events)} events before filters")
@@ -375,6 +379,12 @@ def main() -> None:
         choices=("reversal", "continuation", "both"),
         help="Какие сетапы симулировать (только для --from-replay)",
     )
+    parser.add_argument(
+        "--max-expanded-bars-per-tf",
+        type=int,
+        default=None,
+        help="Cap для авторасширения младших TF в replay/export",
+    )
     args = parser.parse_args()
 
     kinds_tuple = tuple(k.strip() for k in args.kinds.split(",") if k.strip())
@@ -392,6 +402,7 @@ def main() -> None:
             limit=args.limit,
             mode=args.mode,
             max_markers=args.max_markers,
+            max_expanded_bars_per_tf=args.max_expanded_bars_per_tf,
         )
         return
 

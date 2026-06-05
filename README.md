@@ -87,15 +87,14 @@ Pine-индикатора `Market Structure` by Leviathan** — пользова
 entry:
   cascade_enabled: true
   cascade_by_htf:
-    "1H": "15M|5M|1M"
-  cascade_retrace_level: 0.5
-  cascade_confirm_structure_kinds: [BOS]
+    "1H": "5M|1M"
+  cascade_confirm_structure_kinds: [BOS, CHOCH]
 ```
 
-Логика: PREPARE на 1H уже означает касание 0.5; дальше бот ждёт BOS на 15M,
-затем откат к 0.5 этого 15M-импульса и BOS на 5M, затем откат к 0.5 5M-импульса
-и финальный BOS на 1M. Прогресс хранится в setup, поэтому перезапуск процесса не
-сбрасывает пройденные стадии.
+Логика: PREPARE на 1H уже означает касание 0.5; дальше бот ждёт BOS/CHoCH на
+5M, затем BOS/CHoCH на 1M строго после 5M-пробоя и сразу отправляет ENTRY.
+Дополнительный откат на 5M/1M больше не требуется. Прогресс хранится в setup,
+поэтому перезапуск процесса не сбрасывает пройденные стадии.
 
 ## Тест стратегии на истории
 
@@ -160,11 +159,16 @@ pytest -q tests
 cd crypto-signal-bot
 source .venv/bin/activate
 python -m bot.history_replay --symbol BTCUSDT --mode both --limit 1000
+# точечно как Pine export для 1H, с прогрессом:
+python -m bot.history_replay --symbol HYPEUSDT --mode continuation --limit 1000 --focus-htf 1H --progress
 # или после pip install -e .
 signal-bot-replay --symbol ETHUSDT --mode reversal --limit 1000
 ```
 
 `--mode`: `reversal`, `continuation`, `both` (по умолчанию `both`).
+`--max-expanded-bars-per-tf` переопределяет глубину младших TF. Для каскада
+`1H -> 15M -> 5M -> 1M` месяц истории требует примерно `60000` свечей `1M`;
+иначе финальные ENTRY на истории могут не появиться из-за нехватки `1M`-данных.
 
 ### Плотность сигналов (replay)
 
@@ -306,6 +310,7 @@ signal-bot-export-pine --symbol ETHUSDT --tf 1H --from-replay --mode continuatio
 Параметры `--from-replay`:
 - `--mode {reversal,continuation,both}` — какие сетапы симулировать;
 - `--limit N` — свечей на TF (≤1000, Bybit klines API);
+- `--max-expanded-bars-per-tf N` — cap младших TF при авторасширении истории (`1H -> 1M` при `--limit 1000` требует до `60000`);
 - `--max-markers 400` — режется до N **последних** маркеров (Pine v5 лимит ~500 на индикатор: каждый PREPARE = label+box, ENTRY = label + 2 line, INVALIDATED = label).
 
 ### Pine overlay из `bot.db`

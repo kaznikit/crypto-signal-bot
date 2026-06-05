@@ -100,6 +100,8 @@ class SignalBotApp:
             category=self._cfg.exchange.category,
             api_key=self._env.bybit_api_key,
             api_secret=self._env.bybit_api_secret,
+            domain=self._cfg.exchange.domain,
+            tld=self._cfg.exchange.tld,
         )
         self._notifier = TelegramNotifier(
             bot_token=self._env.tg_bot_token,
@@ -566,10 +568,6 @@ class SignalBotApp:
                 continue
             if ltf_result.status == "LTF_NOT_CLOSED":
                 funnel["active_setup_ltf_bar_not_closed"] += 1
-                continue
-            if ltf_result.status == "WAITING_RETRACE":
-                suffix = ltf_result.wait_suffix or "retrace"
-                funnel[f"setup_waiting_ltf_{suffix}"] += 1
                 continue
             if ltf_result.status == "WAITING_CONFIRM":
                 suffix = ltf_result.wait_suffix or "structure"

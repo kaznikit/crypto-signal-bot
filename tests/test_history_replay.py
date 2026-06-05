@@ -14,6 +14,7 @@ from bot.history_replay import (
     _normalize_structure_sequence,
     _resolve_trade_exit,
     ReplaySetup,
+    _expanded_limits_by_tf,
     _summarize,
 )
 
@@ -79,6 +80,19 @@ def test_summarize_basic_metrics() -> None:
     assert summary.losses == 1
     assert summary.winrate_pct == 50.0
     assert summary.total_r == 1.0
+
+
+def test_expanded_limits_respect_custom_cap() -> None:
+    limits = _expanded_limits_by_tf(
+        needed_tfs=("1M", "5M", "15M", "1H"),
+        limit=1000,
+        max_bars_per_tf=60_000,
+    )
+
+    assert limits["1H"] == 1000
+    assert limits["15M"] == 4000
+    assert limits["5M"] == 12_000
+    assert limits["1M"] == 60_000
 
 
 def test_invalidate_armed_replay_setups_by_key() -> None:

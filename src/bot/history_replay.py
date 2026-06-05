@@ -59,10 +59,7 @@ TF_MS: dict[str, int] = {
     "4H": 4 * 60 * 60 * 1000,
 }
 
-# Практический upper bound для младших TF в replay.
-# Без cap горизонт 4H→5M при limit=1000 требует 48k баров и делает walk-forward
-# слишком тяжёлым по времени.
-MAX_EXPANDED_BARS_PER_TF = 4_000
+DEFAULT_MAX_EXPANDED_BARS_PER_TF = 4_000
 
 
 @dataclass(slots=True)
@@ -206,6 +203,7 @@ def _expanded_limits_by_tf(
     *,
     needed_tfs: tuple[str, ...],
     limit: int,
+    max_bars_per_tf: int,
 ) -> dict[str, int]:
     """Расширить лимиты младших TF до горизонта старшего TF.
 
@@ -221,7 +219,7 @@ def _expanded_limits_by_tf(
         tf_ms = TF_MS[tf]
         # ceil(limit * max_tf_ms / tf_ms)
         scaled = (limit * max_tf_ms + tf_ms - 1) // tf_ms
-        out[tf] = min(MAX_EXPANDED_BARS_PER_TF, max(limit, int(scaled)))
+        out[tf] = min(max_bars_per_tf, max(limit, int(scaled)))
     return out
 
 
@@ -268,6 +266,18 @@ def _format_bybit_download_error(
         lines.append("")
         lines.append("Proxy-переменные в окружении процесса не найдены.")
     return "\n".join(lines)
+
+
+def _print_fetch_progress(tf: str, loaded: int, limit: int) -> None:
+    print(f"Fetching Bybit candles {tf}: {loaded}/{limit}", flush=True)
+
+
+def _print_replay_progress(done: int, total: int, events_count: int) -> None:
+    print(f"Replaying history: {done}/{total} bars, events={events_count}", flush=True)
+
+
+def _print_progress(message: str) -> None:
+    print(message, flush=True)
 
 
 def _invalidate_armed_replay_setups_by_key(
@@ -1009,6 +1019,9 @@ async def run_history_replay(
     events_out: list[dict[str, Any]] | None = None,
     quiet: bool = False,
     focus_htf: str | None = None,
+    progress: bool = False,
+    overlay_tfs: set[str] | None = None,
+    max_expanded_bars_per_tf: int | None = None,
 ) -> None:
     if not quiet:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -1019,13 +1032,34 @@ async def run_history_replay(
         category=cfg.exchange.category,
         api_key=env.bybit_api_key,
         api_secret=env.bybit_api_secret,
+        domain=cfg.exchange.domain,
+        tld=cfg.exchange.tld,
     )
 
     needed_tfs, replay_targets = _load_timeframes(mode, cfg, focus_htf=focus_htf)
-    limit_by_tf = _expanded_limits_by_tf(needed_tfs=needed_tfs, limit=limit)
+    max_bars_per_tf = int(
+        max_expanded_bars_per_tf
+        if max_expanded_bars_per_tf is not None
+        else cfg.history_replay.max_expanded_bars_per_tf
+    )
+    max_bars_per_tf = max(limit, max_bars_per_tf, DEFAULT_MAX_EXPANDED_BARS_PER_TF)
+    limit_by_tf = _expanded_limits_by_tf(
+        needed_tfs=needed_tfs,
+        limit=limit,
+        max_bars_per_tf=max_bars_per_tf,
+    )
+
+    if progress:
+        tf_limits = ", ".join(f"{tf}:{limit_by_tf[tf]}" for tf in needed_tfs)
+        print(f"Loading Bybit history for {symbol}: {tf_limits}", flush=True)
 
     tasks = [
-        client.fetch_klines(symbol=symbol, timeframe=tf, limit=limit_by_tf[tf])
+        client.fetch_klines(
+            symbol=symbol,
+            timeframe=tf,
+            limit=limit_by_tf[tf],
+            progress=_print_fetch_progress if progress else None,
+        )
         for tf in needed_tfs
     ]
     try:
@@ -1063,7 +1097,10 @@ async def run_history_replay(
 
     latest_4h_df: Any = None
 
-    for ts in timeline:
+    if progress:
+        _print_progress(f"Replaying history: 0/{len(timeline)} bars")
+
+    for pos, ts in enumerate(timeline, start=1):
         closed_now: list[str] = []
         for tf in needed_tfs:
             idx = index_by_time[tf].get(ts)
@@ -1084,6 +1121,8 @@ async def run_history_replay(
 
         if events_out is not None:
             for tf in closed_now:
+                if overlay_tfs is not None and tf not in overlay_tfs:
+                    continue
                 _emit_fresh_pivot_events(
                     df=series[tf],
                     htf=tf,
@@ -1491,10 +1530,6 @@ async def run_history_replay(
                 suffix = ltf_result.wait_suffix or "structure"
                 funnel[f"setup_waiting_ltf_{suffix}"] += 1
                 continue
-            if ltf_result.status == "WAITING_RETRACE":
-                suffix = ltf_result.wait_suffix or "retrace"
-                funnel[f"setup_waiting_ltf_{suffix}"] += 1
-                continue
             if ltf_result.status == "CASCADE_ADVANCED":
                 choch = ltf_result.choch
                 if choch is not None:
@@ -1665,6 +1700,13 @@ async def run_history_replay(
 
         open_trades = still_open
 
+        if progress and (pos == len(timeline) or pos % 500 == 0):
+            _print_replay_progress(
+                pos,
+                len(timeline),
+                len(events_out) if events_out is not None else 0,
+            )
+
     for trade in open_trades:
         tf_df = dfs[trade.tf]
         row = tf_df.iloc[-1]
@@ -1687,12 +1729,26 @@ async def run_history_replay(
         funnel["trade_closed_eod"] += 1
 
     if events_out is not None:
+        if progress:
+            _print_progress(f"Post-processing overlay events: {len(events_out)} raw")
         _dedupe_overlay_events(events_out)
+        if progress:
+            _print_progress(f"  dedupe: {len(events_out)}")
         _filter_stale_structure_events(events_out, dfs, cfg)
+        if progress:
+            _print_progress(f"  stale structure filter: {len(events_out)}")
         _normalize_structure_sequence(events_out)
+        if progress:
+            _print_progress(f"  structure sequence normalize: {len(events_out)}")
         _filter_invalidated_impulses(events_out, dfs)
+        if progress:
+            _print_progress(f"  invalidated impulse filter: {len(events_out)}")
         _collapse_impulse_fanout_by_start(events_out)
+        if progress:
+            _print_progress(f"  impulse fanout collapse: {len(events_out)}")
         _keep_single_retrace_pivot_per_leg(events_out, dfs, cfg)
+        if progress:
+            _print_progress(f"  retrace pivot filter: {len(events_out)}")
 
     summary = _summarize(symbol=symbol, mode=mode, closed_trades=closed_trades)
     if not quiet:
@@ -1727,6 +1783,23 @@ def main() -> None:
         default=15,
         help="Сколько причин воронки показывать в отчёте",
     )
+    parser.add_argument(
+        "--focus-htf",
+        choices=("4H", "1H", "15M"),
+        default=None,
+        help="Ограничить replay одним HTF, как делает Pine export с --tf",
+    )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Показывать прогресс загрузки и replay",
+    )
+    parser.add_argument(
+        "--max-expanded-bars-per-tf",
+        type=int,
+        default=None,
+        help="Переопределить cap авторасширения младших TF для replay",
+    )
     args = parser.parse_args()
 
     config_path = _find_config_path()
@@ -1737,6 +1810,9 @@ def main() -> None:
             limit=args.limit,
             top_reasons=args.top_reasons,
             config_path=config_path,
+            focus_htf=args.focus_htf,
+            progress=args.progress,
+            max_expanded_bars_per_tf=args.max_expanded_bars_per_tf,
         )
     )
 

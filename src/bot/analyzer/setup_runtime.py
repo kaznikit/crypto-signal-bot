@@ -6,11 +6,9 @@ from typing import Any
 import pandas as pd
 
 from bot.analyzer.entry_ltf import (
-    cascade_retrace_level_for_confirm,
     cascade_sequence_for_htf,
     detect_entry_structure_confirm,
     finest_closed_ltf,
-    first_retrace_touch_open_ms,
     invalidation_tf_for_setup,
     prepare_since_open_ms,
     try_entry_confirm,
@@ -32,13 +30,13 @@ class PriceInvalidationResult:
 
 @dataclass(slots=True, frozen=True)
 class LtfConfirmationResult:
-    status: str  # NO_MATCHING_LTF | LTF_NOT_CLOSED | WAITING_* | CASCADE_ADVANCED | CONFIRMED
+    status: str  # NO_MATCHING_LTF | LTF_NOT_CLOSED | WAITING_CONFIRM | CASCADE_ADVANCED | CONFIRMED
     used_tf: str | None = None
     ltf_df: pd.DataFrame | None = None
     row: Any | None = None
     choch: LtfChoCh | None = None
     wait_suffix: str | None = None
-    cascade_update: "EntryCascadeUpdate | None" = None
+    cascade_update: EntryCascadeUpdate | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -119,10 +117,8 @@ def _resolve_cascade_ltf_confirmation(
     since_open_ms = _cascade_initial_since_ms(setup)
 
     if stage > 0:
-        retrace_level = getattr(setup, "entry_cascade_retrace_level", None)
         previous_break_ms = getattr(setup, "entry_cascade_since_ms", None)
-        touch_ms = getattr(setup, "entry_cascade_touch_ms", None)
-        if retrace_level is None or previous_break_ms is None:
+        if previous_break_ms is None:
             cascade_update = EntryCascadeUpdate(
                 stage=0,
                 since_ms=None,
@@ -137,28 +133,7 @@ def _resolve_cascade_ltf_confirmation(
                 wait_suffix="cascade_reset",
                 cascade_update=cascade_update,
             )
-        if touch_ms is None:
-            touch_ms = first_retrace_touch_open_ms(
-                ltf_df,
-                direction=str(setup.direction),
-                level=float(retrace_level),
-                since_open_ms=int(previous_break_ms),
-            )
-            if touch_ms is None:
-                return LtfConfirmationResult(
-                    status="WAITING_RETRACE",
-                    used_tf=used_tf,
-                    ltf_df=ltf_df,
-                    row=row,
-                    wait_suffix="retrace",
-                )
-            cascade_update = EntryCascadeUpdate(
-                stage=stage,
-                since_ms=int(previous_break_ms),
-                touch_ms=int(touch_ms),
-                retrace_level=float(retrace_level),
-            )
-        since_open_ms = int(touch_ms) + 1
+        since_open_ms = int(previous_break_ms) + 1
 
     kinds = tuple(k.upper() for k in entry.cascade_confirm_structure_kinds) or ("BOS",)
     choch = detect_entry_structure_confirm(
@@ -194,24 +169,14 @@ def _resolve_cascade_ltf_confirmation(
             cascade_update=cascade_update,
         )
 
-    retrace_level = cascade_retrace_level_for_confirm(
-        entry=entry,
-        ltf_df=ltf_df,
-        used_tf=used_tf,
-        choch=choch,
-        pivot_swing_by_tf=pivot_swing_by_tf,
-        liberal_swing_override=liberal_swing_override,
-        is_liberal=bool(getattr(setup, "is_liberal", False)),
-        use_close=use_close,
-    )
-    if retrace_level is None or choch.broken_open_ms is None:
+    if choch.broken_open_ms is None:
         return LtfConfirmationResult(
             status="WAITING_CONFIRM",
             used_tf=used_tf,
             ltf_df=ltf_df,
             row=row,
             choch=choch,
-            wait_suffix="cascade_leg",
+            wait_suffix="cascade_break_time",
             cascade_update=cascade_update,
         )
 
@@ -219,7 +184,7 @@ def _resolve_cascade_ltf_confirmation(
         stage=stage + 1,
         since_ms=int(choch.broken_open_ms),
         touch_ms=None,
-        retrace_level=float(retrace_level),
+        retrace_level=None,
     )
     return LtfConfirmationResult(
         status="CASCADE_ADVANCED",

@@ -11,6 +11,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class ExchangeConfig(BaseModel):
     name: str
     category: str
+    domain: str = "bybit"
+    tld: str = "com"
 
 
 class SymbolsConfig(BaseModel):
@@ -124,12 +126,14 @@ class EntryConfig(BaseModel):
     ltf_swing_use_pivot_sizes: bool = False
     # Максимум ENTRY-сигналов на один setup, пока он остаётся валидным.
     max_entries_per_setup: int = 2
-    # Каскадный ENTRY: после PREPARE на HTF подтверждение идёт по цепочке
-    # TF, например 1H -> 15M BOS -> retrace 0.5 -> 5M BOS -> retrace 0.5 -> 1M BOS.
+    # Каскадный ENTRY: после PREPARE на HTF подтверждение идёт по цепочке TF,
+    # например 1H -> 5M BOS/CHoCH -> 1M BOS/CHoCH.
     cascade_enabled: bool = False
-    cascade_by_htf: dict[str, str] = Field(default_factory=lambda: {"1H": "15M|5M|1M"})
+    cascade_by_htf: dict[str, str] = Field(default_factory=lambda: {"1H": "5M|1M"})
     cascade_retrace_level: float = 0.5
-    cascade_confirm_structure_kinds: list[str] = Field(default_factory=lambda: ["BOS"])
+    cascade_confirm_structure_kinds: list[str] = Field(
+        default_factory=lambda: ["BOS", "CHOCH"]
+    )
 
 
 class FiltersConfig(BaseModel):
@@ -169,6 +173,13 @@ class PaperModeConfig(BaseModel):
     liberal: LiberalConfig = Field(default_factory=LiberalConfig)
 
 
+class HistoryReplayConfig(BaseModel):
+    # Upper bound для авторасширения младших TF в history replay/export.
+    # Для каскада 1H -> 15M -> 5M -> 1M нужен глубокий 1M-ряд:
+    # 1000 свечей 1H = до 60000 свечей 1M.
+    max_expanded_bars_per_tf: int = 4_000
+
+
 class StrategyFeaturesConfig(BaseModel):
     """Опциональные правила стратегии — включаются через config.yaml.
 
@@ -205,6 +216,7 @@ class BotConfig(BaseModel):
     risk: RiskConfig
     telegram: TelegramConfig
     paper_mode: PaperModeConfig
+    history_replay: HistoryReplayConfig = Field(default_factory=HistoryReplayConfig)
     strategy_features: StrategyFeaturesConfig = Field(default_factory=StrategyFeaturesConfig)
 
     def prepare_htfs(self) -> tuple[str, ...]:

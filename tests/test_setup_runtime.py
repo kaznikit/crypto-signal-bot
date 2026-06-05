@@ -157,127 +157,105 @@ def test_resolve_ltf_confirmation_confirmed(monkeypatch) -> None:
     assert result.row is not None
 
 
-def test_cascade_advances_after_first_tf_bos(monkeypatch) -> None:
+def test_cascade_advances_after_first_tf_structure(monkeypatch) -> None:
     setup = _Setup(
         htf="1H",
-        ltf_expected="15M|5M|1M",
+        ltf_expected="5M|1M",
         direction="LONG",
         invalidation_price=95.0,
         prepare_since_ms=500,
     )
-    series = {"15M": _df(open_time=1_000)}
-    entry = EntryConfig(cascade_enabled=True, cascade_by_htf={"1H": "15M|5M|1M"})
+    series = {"5M": _df(open_time=1_000)}
+    entry = EntryConfig(
+        cascade_enabled=True,
+        cascade_by_htf={"1H": "5M|1M"},
+        cascade_confirm_structure_kinds=["BOS", "CHOCH"],
+    )
     choch = LtfChoCh(
         direction="LONG",
         level=101.0,
         bars_ago=0,
-        kind="BOS",
+        kind="CHOCH",
         broken_open_ms=1_000,
     )
+    calls: list[dict] = []
 
-    monkeypatch.setattr(
-        "bot.analyzer.setup_runtime.detect_entry_structure_confirm",
-        lambda **kwargs: choch,
-    )
-    monkeypatch.setattr(
-        "bot.analyzer.setup_runtime.cascade_retrace_level_for_confirm",
-        lambda **kwargs: 99.5,
-    )
+    def _fake_confirm(**kwargs):
+        calls.append(kwargs)
+        return choch
+
+    monkeypatch.setattr("bot.analyzer.setup_runtime.detect_entry_structure_confirm", _fake_confirm)
 
     result = resolve_ltf_confirmation(
         setup=setup,
         series=series,
-        closed_tfs=["15M"],
+        closed_tfs=["5M"],
         entry=entry,
-        pivot_swing_by_tf={"15M": 8},
+        pivot_swing_by_tf={"5M": 8},
         liberal_swing_override=None,
         use_close=True,
     )
 
     assert result.status == "CASCADE_ADVANCED"
-    assert result.used_tf == "15M"
+    assert result.used_tf == "5M"
     assert result.cascade_update is not None
     assert result.cascade_update.stage == 1
     assert result.cascade_update.since_ms == 1_000
     assert result.cascade_update.touch_ms is None
-    assert result.cascade_update.retrace_level == 99.5
+    assert result.cascade_update.retrace_level is None
+    assert calls[0]["since_open_ms"] == 500
+    assert calls[0]["structure_kinds"] == ("BOS", "CHOCH")
 
 
-def test_cascade_waits_retrace_before_next_tf_bos() -> None:
+def test_cascade_waits_next_tf_structure_without_retrace(monkeypatch) -> None:
     setup = _Setup(
         htf="1H",
-        ltf_expected="15M|5M|1M",
+        ltf_expected="5M|1M",
         direction="LONG",
         invalidation_price=95.0,
         entry_cascade_stage=1,
         entry_cascade_since_ms=1_000,
-        entry_cascade_retrace_level=99.0,
     )
-    series = {"5M": _df(open_time=2_000, low=100.0)}
-    entry = EntryConfig(cascade_enabled=True, cascade_by_htf={"1H": "15M|5M|1M"})
+    series = {"1M": _df(open_time=2_000, low=100.0)}
+    entry = EntryConfig(cascade_enabled=True, cascade_by_htf={"1H": "5M|1M"})
+    calls: list[dict] = []
 
-    result = resolve_ltf_confirmation(
-        setup=setup,
-        series=series,
-        closed_tfs=["5M"],
-        entry=entry,
-        pivot_swing_by_tf={"5M": 5},
-        liberal_swing_override=None,
-        use_close=True,
-    )
-
-    assert result.status == "WAITING_RETRACE"
-    assert result.used_tf == "5M"
-    assert result.cascade_update is None
-
-
-def test_cascade_records_retrace_touch_before_confirm(monkeypatch) -> None:
-    setup = _Setup(
-        htf="1H",
-        ltf_expected="15M|5M|1M",
-        direction="LONG",
-        invalidation_price=95.0,
-        entry_cascade_stage=1,
-        entry_cascade_since_ms=1_000,
-        entry_cascade_retrace_level=99.0,
-    )
-    series = {"5M": _df(open_time=2_000, low=98.5)}
-    entry = EntryConfig(cascade_enabled=True, cascade_by_htf={"1H": "15M|5M|1M"})
+    def _fake_confirm(**kwargs):
+        calls.append(kwargs)
+        return None
 
     monkeypatch.setattr(
         "bot.analyzer.setup_runtime.detect_entry_structure_confirm",
-        lambda **kwargs: None,
+        _fake_confirm,
     )
 
     result = resolve_ltf_confirmation(
         setup=setup,
         series=series,
-        closed_tfs=["5M"],
+        closed_tfs=["1M"],
         entry=entry,
-        pivot_swing_by_tf={"5M": 5},
+        pivot_swing_by_tf={"1M": 5},
         liberal_swing_override=None,
         use_close=True,
     )
 
     assert result.status == "WAITING_CONFIRM"
-    assert result.cascade_update is not None
-    assert result.cascade_update.stage == 1
-    assert result.cascade_update.touch_ms == 2_000
+    assert result.used_tf == "1M"
+    assert result.cascade_update is None
+    assert calls[0]["since_open_ms"] == 1_001
 
 
 def test_cascade_confirms_only_on_final_tf(monkeypatch) -> None:
     setup = _Setup(
         htf="1H",
-        ltf_expected="15M|5M|1M",
+        ltf_expected="5M|1M",
         direction="SHORT",
         invalidation_price=105.0,
-        entry_cascade_stage=2,
+        entry_cascade_stage=1,
         entry_cascade_since_ms=3_000,
-        entry_cascade_touch_ms=4_000,
-        entry_cascade_retrace_level=101.0,
     )
     series = {"1M": _df(open_time=5_000, open_=100.0, high=101.0, low=98.0, close=98.5)}
-    entry = EntryConfig(cascade_enabled=True, cascade_by_htf={"1H": "15M|5M|1M"})
+    entry = EntryConfig(cascade_enabled=True, cascade_by_htf={"1H": "5M|1M"})
     choch = LtfChoCh(
         direction="SHORT",
         level=99.0,
@@ -309,4 +287,4 @@ def test_cascade_confirms_only_on_final_tf(monkeypatch) -> None:
     assert result.status == "CONFIRMED"
     assert result.used_tf == "1M"
     assert result.choch is choch
-    assert calls[0]["since_open_ms"] == 4_001
+    assert calls[0]["since_open_ms"] == 3_001

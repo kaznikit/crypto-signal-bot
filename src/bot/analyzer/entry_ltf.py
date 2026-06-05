@@ -8,9 +8,6 @@ from bot.config import EntryConfig
 from bot.market.pivots import (
     LtfChoCh,
     detect_ltf_entry_confirm,
-    detect_pivots,
-    extract_impulse_legs_confirmed,
-    extract_structure_breaks,
 )
 
 # Дефолты, если в конфиге нет ключа для HTF.
@@ -180,77 +177,6 @@ def try_entry_confirm(
     if choch is None:
         return False, None
     return True, choch
-
-
-def first_retrace_touch_open_ms(
-    df: pd.DataFrame,
-    *,
-    direction: str,
-    level: float,
-    since_open_ms: int,
-) -> int | None:
-    tail = df[df["open_time"] > int(since_open_ms)]
-    if tail.empty:
-        return None
-    if direction == "LONG":
-        touched = tail[tail["low"] <= float(level)]
-    else:
-        touched = tail[tail["high"] >= float(level)]
-    if touched.empty:
-        return None
-    return int(touched.iloc[0]["open_time"])
-
-
-def cascade_retrace_level_for_confirm(
-    *,
-    entry: EntryConfig,
-    ltf_df: pd.DataFrame,
-    used_tf: str,
-    choch: LtfChoCh,
-    pivot_swing_by_tf: dict[str, int] | None,
-    liberal_swing_override: dict[str, int] | None,
-    is_liberal: bool,
-    use_close: bool,
-) -> float | None:
-    if choch.broken_open_ms is None:
-        return None
-    matched = ltf_df.index[ltf_df["open_time"] == int(choch.broken_open_ms)]
-    if len(matched) == 0:
-        return None
-    anchor_idx = int(matched[-1])
-    swing = resolve_entry_swing_size(
-        entry,
-        used_tf,
-        is_liberal=is_liberal,
-        liberal_override=liberal_swing_override,
-        pivot_swing_by_tf=pivot_swing_by_tf,
-    )
-    breaks = extract_structure_breaks(ltf_df, swing_size=swing, use_close=use_close)
-    pivots = detect_pivots(ltf_df, swing_size=swing)
-    legs = extract_impulse_legs_confirmed(
-        pivots,
-        breaks,
-        swing_size=swing,
-        df=ltf_df,
-    )
-    candidates = [
-        leg
-        for leg in legs
-        if leg.direction == choch.direction and leg.anchor_break_idx == anchor_idx
-    ]
-    if not candidates:
-        candidates = [
-            leg
-            for leg in legs
-            if leg.direction == choch.direction
-            and leg.anchor_break_idx is not None
-            and int(leg.anchor_break_idx) <= anchor_idx
-        ]
-    if not candidates:
-        return None
-    leg = candidates[-1]
-    ratio = float(entry.cascade_retrace_level)
-    return leg.start_price + (leg.end_price - leg.start_price) * ratio
 
 
 def invalidation_tf_for_setup(
