@@ -4,8 +4,9 @@
 
 1. Установите Python 3.11 и git.
 2. Скопируйте проект на VPS в `/home/tradingbot/app`.
-3. Заполните `.env` (chmod 600).
-4. Запустите:
+3. Создайте локальный конфиг: `cp config.example.yaml config.yaml`.
+4. Заполните `.env` (chmod 600).
+5. Запустите:
 
 ```bash
 chmod +x deploy/install.sh

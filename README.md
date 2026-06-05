@@ -9,8 +9,9 @@ Python-бот для сигналов по крипте на базе CHoCH + Fi
 3. `source .venv/bin/activate`
 4. `pip install -e ".[dev]"`
 5. `cp .env.example .env`
-6. Заполните `TG_BOT_TOKEN`, `TG_CHAT_ID` (для paper — `TG_PAPER_CHAT_ID`).
-7. `python -m bot`
+6. `cp config.example.yaml config.yaml`
+7. Заполните `TG_BOT_TOKEN`, `TG_CHAT_ID` (для paper — `TG_PAPER_CHAT_ID`) и при необходимости поправьте `config.yaml`.
+8. `python -m bot`
 
 Рабочий каталог должен быть `crypto-signal-bot`, чтобы находился `config.yaml`.
 
@@ -56,7 +57,7 @@ Pine-индикатора `Market Structure` by Leviathan** — пользова
 
 ## Включение опций стратегии
 
-Все переключатели в [`config.yaml`](config.yaml), секция **`strategy_features`**:
+Все переключатели в локальном `config.yaml` (шаблон — [`config.example.yaml`](config.example.yaml)), секция **`strategy_features`**:
 
 | Параметр | Назначение |
 |----------|------------|
@@ -353,7 +354,7 @@ signal-bot-export-pine --symbol BTCUSDT --tf 4H --include-liberal --out btc_all.
    pip install -e .
    ```
 
-4. **Конфиг и секреты:** положите `config.yaml` рядом с `pyproject.toml`, создайте `.env` (`chmod 600 .env`) с `TG_BOT_TOKEN`, `TG_CHAT_ID`, при paper — `TG_PAPER_CHAT_ID`, при желании `BYBIT_API_KEY` / `BYBIT_API_SECRET` (для публичных klines ключи не обязательны).
+4. **Конфиг и секреты:** создайте локальный конфиг `cp config.example.yaml config.yaml` рядом с `pyproject.toml`, создайте `.env` (`chmod 600 .env`) с `TG_BOT_TOKEN`, `TG_CHAT_ID`, при paper — `TG_PAPER_CHAT_ID`, при желании `BYBIT_API_KEY` / `BYBIT_API_SECRET` (для публичных klines ключи не обязательны).
 5. **База:** по умолчанию `BOT_DB_URL=sqlite:///./bot.db` — файл появится в текущей директории при первом запуске.
 6. **Systemd:** используйте [`deploy/install.sh`](deploy/install.sh) и [`deploy/tradingbot.service`](deploy/tradingbot.service) из этого репозитория; подробности в [`deploy/README.md`](deploy/README.md).
 7. **Проверка:** `sudo systemctl status tradingbot`, логи: `sudo journalctl -u tradingbot -f`.
