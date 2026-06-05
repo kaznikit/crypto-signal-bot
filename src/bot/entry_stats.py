@@ -35,6 +35,7 @@ class EntryStatsResult:
     target_price: float
     invalidation_price: float
     extreme_price: float
+    entry_open_ms: int
     outcome_open_ms: int
 
 
@@ -76,7 +77,7 @@ def build_entry_stats_candidates(
     prepare_payloads: dict[str, dict[str, Any]],
     processed_signal_ids: set[str],
 ) -> list[EntryStatsCandidate]:
-    candidates: list[EntryStatsCandidate] = []
+    candidates_by_setup: dict[str, EntryStatsCandidate] = {}
     for signal in entry_signals:
         if signal.id in processed_signal_ids:
             continue
@@ -107,20 +108,21 @@ def build_entry_stats_candidates(
             or entry_open_ms is None
         ):
             continue
-        candidates.append(
-            EntryStatsCandidate(
-                signal_id=signal.id,
-                setup_id=setup_id,
-                symbol=symbol,
-                direction=direction,
-                entry_price=entry_price,
-                target_price=target_price,
-                invalidation_price=invalidation_price,
-                entry_open_ms=entry_open_ms,
-                timeframe=str(payload.get("entry_ltf") or payload.get("htf") or "5M"),
-            )
+        candidate = EntryStatsCandidate(
+            signal_id=signal.id,
+            setup_id=setup_id,
+            symbol=symbol,
+            direction=direction,
+            entry_price=entry_price,
+            target_price=target_price,
+            invalidation_price=invalidation_price,
+            entry_open_ms=entry_open_ms,
+            timeframe=str(payload.get("entry_ltf") or payload.get("htf") or "5M"),
         )
-    return candidates
+        previous = candidates_by_setup.get(setup_id)
+        if previous is None or candidate.entry_open_ms >= previous.entry_open_ms:
+            candidates_by_setup[setup_id] = candidate
+    return list(candidates_by_setup.values())
 
 
 def _row_value(row: Any, field: str) -> Any:
@@ -152,6 +154,7 @@ def evaluate_entry_stats_candidate(
                     target_price=candidate.target_price,
                     invalidation_price=candidate.invalidation_price,
                     extreme_price=low,
+                    entry_open_ms=candidate.entry_open_ms,
                     outcome_open_ms=open_time,
                 )
             if high > candidate.target_price:
@@ -164,6 +167,7 @@ def evaluate_entry_stats_candidate(
                     target_price=candidate.target_price,
                     invalidation_price=candidate.invalidation_price,
                     extreme_price=extreme,
+                    entry_open_ms=candidate.entry_open_ms,
                     outcome_open_ms=open_time,
                 )
         return None
@@ -186,6 +190,7 @@ def evaluate_entry_stats_candidate(
                 target_price=candidate.target_price,
                 invalidation_price=candidate.invalidation_price,
                 extreme_price=high,
+                entry_open_ms=candidate.entry_open_ms,
                 outcome_open_ms=open_time,
             )
         if low < candidate.target_price:
@@ -198,6 +203,7 @@ def evaluate_entry_stats_candidate(
                 target_price=candidate.target_price,
                 invalidation_price=candidate.invalidation_price,
                 extreme_price=extreme,
+                entry_open_ms=candidate.entry_open_ms,
                 outcome_open_ms=open_time,
             )
     return None
@@ -214,28 +220,13 @@ def format_entry_stats_messages(
     summary_lines = []
     for result in results:
         sign = GREEN_CHECK_SIGN if result.status == "SUCCESS" else RED_CANCEL_SIGN
-        summary_lines.append(f"{sign} {result.symbol} {result.direction}")
+        summary_lines.append(
+            f"{sign} {result.symbol} {_format_ms(result.entry_open_ms)} {result.direction}"
+        )
 
-    rows = [
-        [
-            result.symbol,
-            result.direction,
-            result.status,
-            f"{result.entry_price:g}",
-            f"{result.target_price:g}",
-            f"{result.invalidation_price:g}",
-            f"{result.extreme_price:g}",
-            _format_ms(result.outcome_open_ms),
-        ]
-        for result in results
-    ]
-    table = _format_table(
-        ["Symbol", "Side", "Result", "Entry", "Target", "Invalid", "Extreme", "Time"],
-        rows,
-    )
     chunks: list[str] = []
     current: list[str] = []
-    for line in [*summary_lines, "", "Trades:", *table]:
+    for line in summary_lines:
         candidate = "\n".join([*current, line]) if current else line
         if current and len(candidate) > max_message_len:
             chunks.append("\n".join(current))
@@ -249,17 +240,3 @@ def format_entry_stats_messages(
 
 def _format_ms(value: int) -> str:
     return datetime.fromtimestamp(value / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M")
-
-
-def _format_table(headers: list[str], rows: list[list[str]]) -> list[str]:
-    widths = [
-        max(len(headers[idx]), *(len(row[idx]) for row in rows))
-        for idx in range(len(headers))
-    ]
-    header = " | ".join(headers[idx].ljust(widths[idx]) for idx in range(len(headers)))
-    separator = "-+-".join("-" * width for width in widths)
-    body = [
-        " | ".join(row[idx].ljust(widths[idx]) for idx in range(len(headers)))
-        for row in rows
-    ]
-    return [header, separator, *body]

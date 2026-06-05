@@ -69,6 +69,45 @@ def test_entry_stats_candidate_uses_prepare_impulse_target() -> None:
     assert candidates[0].invalidation_price == 95
 
 
+def test_entry_stats_candidates_keep_latest_entry_per_setup() -> None:
+    entries = [
+        _signal(
+            "entry-1",
+            "setup-1",
+            "ENTRY",
+            {
+                "setup_id": "setup-1",
+                "symbol": "BTCUSDT",
+                "direction": "LONG",
+                "entry": 100,
+                "bar_open_ms": 1_000,
+                "impulse_end_price": 110,
+                "invalidation_price": 95,
+            },
+        ),
+        _signal(
+            "entry-2",
+            "setup-1",
+            "ENTRY",
+            {
+                "setup_id": "setup-1",
+                "symbol": "BTCUSDT",
+                "direction": "LONG",
+                "entry": 98,
+                "bar_open_ms": 2_000,
+                "impulse_end_price": 110,
+                "invalidation_price": 95,
+            },
+        ),
+    ]
+
+    candidates = build_entry_stats_candidates(entries, {}, set())
+
+    assert len(candidates) == 1
+    assert candidates[0].signal_id == "entry-2"
+    assert candidates[0].entry_price == 98
+
+
 def test_entry_stats_long_success_when_high_updates_impulse_max() -> None:
     candidate = build_entry_stats_candidates(
         [
@@ -136,7 +175,7 @@ def test_entry_stats_short_fail_when_price_breaks_impulse_start() -> None:
     assert result.extreme_price == 106
 
 
-def test_entry_stats_message_contains_summary_and_table() -> None:
+def test_entry_stats_message_contains_short_summary_only() -> None:
     candidate = build_entry_stats_candidates(
         [
             _signal(
@@ -165,9 +204,9 @@ def test_entry_stats_message_contains_summary_and_table() -> None:
 
     message = format_entry_stats_message([result])
 
-    assert "✅ BTCUSDT LONG" in message
-    assert "Symbol" in message
-    assert "BTCUSDT" in message
+    assert message == "✅ BTCUSDT 1970-01-01 00:00 LONG"
+    assert "Trades:" not in message
+    assert "Symbol" not in message
 
 
 def test_entry_stats_messages_are_split_under_limit() -> None:
@@ -181,6 +220,7 @@ def test_entry_stats_messages_are_split_under_limit() -> None:
             target_price=110,
             invalidation_price=95,
             extreme_price=111,
+            entry_open_ms=1_000,
             outcome_open_ms=2_000,
         )
         for idx in range(80)
