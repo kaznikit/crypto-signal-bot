@@ -75,6 +75,28 @@ class Repository:
                 conn.execute(
                     text("ALTER TABLE setups ADD COLUMN entry_cascade_retrace_level FLOAT")
                 )
+            if "entry_mode" not in cols:
+                conn.execute(
+                    text("ALTER TABLE setups ADD COLUMN entry_mode VARCHAR(16) DEFAULT 'simple'")
+                )
+            if "entry_advanced_stage" not in cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE setups ADD COLUMN "
+                        "entry_advanced_stage VARCHAR(32) DEFAULT 'WAIT_SWEEP'"
+                    )
+                )
+            for column in (
+                "entry_sweep_level",
+                "entry_sweep_extreme",
+                "entry_confirm_level",
+                "entry_target_price",
+            ):
+                if column not in cols:
+                    conn.execute(text(f"ALTER TABLE setups ADD COLUMN {column} FLOAT"))
+            for column in ("entry_sweep_ms", "entry_reclaim_ms", "entry_confirm_ms"):
+                if column not in cols:
+                    conn.execute(text(f"ALTER TABLE setups ADD COLUMN {column} INTEGER"))
 
     def upsert_setup(self, setup: Setup) -> None:
         with self._session_factory() as session:

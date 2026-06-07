@@ -71,6 +71,8 @@ def test_entry_max_entries_per_setup_default() -> None:
         }
     )
     assert cfg.entry.max_entries_per_setup == 2
+    assert cfg.entry.mode == "simple"
+    assert cfg.entry.advanced.confirm_structure_kinds == ["CHOCH"]
     assert cfg.telegram.send_prepare_signals is True
     assert cfg.entry_stats.check_interval_hours == 24
     assert cfg.entry_stats.max_candidates_per_run == 25

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -90,9 +90,31 @@ class PivotsConfig(BaseModel):
     impulse_max_age_bars: int = 60
 
 
+class EntryAdvancedConfig(BaseModel):
+    """Продвинутый ENTRY: sweep -> reclaim -> CHoCH -> retest."""
+
+    sweep_lookback_bars: int = 48
+    reclaim_max_bars: int = 3
+    confirm_max_bars: int = 12
+    confirm_structure_kinds: list[str] = Field(default_factory=lambda: ["CHOCH"])
+    require_displacement: bool = True
+    require_directional_reclaim: bool = False
+    displacement_body_atr_min: float = 0.8
+    require_volume_expansion: bool = False
+    volume_multiplier: float = 1.3
+    retest_max_bars: int = 12
+    retest_tolerance_atr: float = 0.15
+    stop_source: Literal["retest_extreme", "sweep_extreme"] = "retest_extreme"
+    stop_buffer_atr: float = 0.15
+    max_stop_atr: float = 1.5
+    min_rr_to_htf_target: float = 3.0
+
+
 class EntryConfig(BaseModel):
     """LTF-подтверждение ENTRY после PREPARE на HTF."""
 
+    # simple — текущий ENTRY по LTF BOS/CHoCH; advanced — sweep/reclaim/CHoCH/retest.
+    mode: Literal["simple", "advanced", "sweep_reclaim"] = "simple"
     # HTF сетапа → LTF для ENTRY (pipe, приоритет слева: «5M|15M|1H» для 4H).
     ltf_by_htf: dict[str, str] = Field(
         default_factory=lambda: {
@@ -134,6 +156,7 @@ class EntryConfig(BaseModel):
     cascade_confirm_structure_kinds: list[str] = Field(
         default_factory=lambda: ["BOS", "CHOCH"]
     )
+    advanced: EntryAdvancedConfig = Field(default_factory=EntryAdvancedConfig)
 
 
 class FiltersConfig(BaseModel):

@@ -89,15 +89,21 @@ def build_entry_stats_candidates(
             continue
 
         entry_price = _float_or_none(payload.get("entry") or payload.get("origin_price"))
+        entry_mode = str(payload.get("entry_mode") or "simple").lower()
         target_price = _float_or_none(
-            payload.get("impulse_end_price") or prepare_payload.get("impulse_end_price")
+            payload.get("target_price")
+            or payload.get("impulse_end_price")
+            or prepare_payload.get("impulse_end_price")
         )
-        invalidation_price = _float_or_none(
-            payload.get("impulse_start_price")
-            or payload.get("invalidation_price")
-            or prepare_payload.get("impulse_start_price")
-            or prepare_payload.get("invalidation_price")
-        )
+        if entry_mode in {"advanced", "sweep_reclaim"}:
+            invalidation_price = _float_or_none(payload.get("recommended_stop"))
+        else:
+            invalidation_price = _float_or_none(
+                payload.get("impulse_start_price")
+                or payload.get("invalidation_price")
+                or prepare_payload.get("impulse_start_price")
+                or prepare_payload.get("invalidation_price")
+            )
         entry_open_ms = _int_or_none(payload.get("bar_open_ms"))
         symbol = str(payload.get("symbol") or prepare_payload.get("symbol") or "")
         if (

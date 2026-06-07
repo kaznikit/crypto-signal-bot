@@ -112,14 +112,26 @@ class TelegramNotifier:
                 except (TypeError, ValueError):
                     idx_num = None
             is_reentry = bool(idx_num is not None and idx_num > 1)
-            return (
-                f"{prefix}ENTRY\n"
-                f"{symbol}\n"
-                f"{direction}\n"
-                f"invalidate {payload.get('invalidation_price')}\n"
-                f"isReentry {str(is_reentry).lower()}\n"
-                f"Score {payload.get('score', 0)}{tv_line}"
+            lines = [
+                f"{prefix}ENTRY",
+                str(symbol),
+                str(direction),
+                f"entry {payload.get('entry')}",
+            ]
+            if payload.get("recommended_stop") is not None:
+                lines.append(f"recommendedStop {payload.get('recommended_stop')}")
+            lines.append(f"invalidate {payload.get('invalidation_price')}")
+            target = payload.get("target_price", payload.get("tp"))
+            if target is not None:
+                lines.append(f"target {target}")
+            lines.extend(
+                [
+                    f"mode {payload.get('entry_mode', 'simple')}",
+                    f"isReentry {str(is_reentry).lower()}",
+                    f"Score {payload.get('score', 0)}{tv_line}",
+                ]
             )
+            return "\n".join(lines)
         if kind == SignalKind.INVALIDATED:
             return f"{prefix}INVALIDATED {payload.get('type', '')} {symbol}{tv_line}"
         return "HEARTBEAT bot is alive"

@@ -27,9 +27,10 @@ def parse_ltf_pipe(value: str) -> list[str]:
 
 def ltf_expected_for_htf(htf: str, entry: EntryConfig) -> str:
     """Pipe-список LTF для ENTRY (порядок = приоритет: сначала младший TF)."""
-    cascade = cascade_sequence_for_htf(htf, entry)
-    if cascade:
-        return "|".join(cascade)
+    if str(entry.mode).lower() not in {"advanced", "sweep_reclaim"}:
+        cascade = cascade_sequence_for_htf(htf, entry)
+        if cascade:
+            return "|".join(cascade)
     if entry.ltf_by_htf and htf in entry.ltf_by_htf:
         return str(entry.ltf_by_htf[htf])
     return DEFAULT_LTF_BY_HTF.get(htf, "5M")

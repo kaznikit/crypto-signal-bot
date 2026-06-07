@@ -179,10 +179,14 @@ def _collect_arrays(
         elif kind == "ENTRY":
             prices.append(float(ev.get("entry") or 0))
             sl = ev.get("sl")
+            if sl is None:
+                sl = ev.get("recommended_stop")
             sls.append(float(sl) if sl is not None else None)
             tp = ev.get("tp1")
             if tp is None:
                 tp = ev.get("tp")
+            if tp is None:
+                tp = ev.get("target_price")
             tps.append(float(tp) if tp is not None else None)
             times2.append(0)
         elif kind == "STRUCTURE":

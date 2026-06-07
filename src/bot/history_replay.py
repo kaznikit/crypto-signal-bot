@@ -19,7 +19,12 @@ from bot.analyzer.entry_ltf import (
     ltf_expected_for_htf,
     prepare_since_open_ms,
 )
-from bot.analyzer.filters import atr_percent, close_beyond_level, finalize_entry_levels
+from bot.analyzer.filters import (
+    atr_percent,
+    close_beyond_level,
+    finalize_entry_levels,
+    recommended_entry_stop,
+)
 from bot.analyzer.reentry import (
     reentry_has_new_structure_break,
     reentry_price_improved,
@@ -87,6 +92,15 @@ class ReplaySetup:
     entry_cascade_since_ms: int | None = None
     entry_cascade_touch_ms: int | None = None
     entry_cascade_retrace_level: float | None = None
+    entry_mode: str = "simple"
+    entry_advanced_stage: str = "WAIT_SWEEP"
+    entry_sweep_level: float | None = None
+    entry_sweep_extreme: float | None = None
+    entry_sweep_ms: int | None = None
+    entry_reclaim_ms: int | None = None
+    entry_confirm_level: float | None = None
+    entry_confirm_ms: int | None = None
+    entry_target_price: float | None = None
 
 
 @dataclass(slots=True)
@@ -197,6 +211,26 @@ def _reset_entry_cascade(setup: Any) -> None:
     setup.entry_cascade_since_ms = None
     setup.entry_cascade_touch_ms = None
     setup.entry_cascade_retrace_level = None
+
+
+def _apply_advanced_entry_update(setup: Any, update: Any) -> None:
+    setup.entry_advanced_stage = str(update.stage)
+    setup.entry_sweep_level = update.sweep_level
+    setup.entry_sweep_extreme = update.sweep_extreme
+    setup.entry_sweep_ms = update.sweep_ms
+    setup.entry_reclaim_ms = update.reclaim_ms
+    setup.entry_confirm_level = update.confirm_level
+    setup.entry_confirm_ms = update.confirm_ms
+
+
+def _reset_advanced_entry(setup: Any) -> None:
+    setup.entry_advanced_stage = "WAIT_SWEEP"
+    setup.entry_sweep_level = None
+    setup.entry_sweep_extreme = None
+    setup.entry_sweep_ms = None
+    setup.entry_reclaim_ms = None
+    setup.entry_confirm_level = None
+    setup.entry_confirm_ms = None
 
 
 def _expanded_limits_by_tf(
@@ -1161,6 +1195,7 @@ async def run_history_replay(
                     bos_use_close=cfg.pivots.bos_use_close,
                     funnel=funnel,
                     ltf_expected=rev_ltf,
+                    entry_mode=cfg.entry.mode,
                 )
                 liberal_wider_choch = False
                 if (setup_obj is None or event is None) and liberal_cfg.enabled:
@@ -1175,6 +1210,7 @@ async def run_history_replay(
                         bos_use_close=cfg.pivots.bos_use_close,
                         funnel=funnel,
                         ltf_expected=rev_ltf,
+                        entry_mode=cfg.entry.mode,
                     )
                     liberal_wider_choch = setup_obj is not None
                 if setup_obj is None or event is None:
@@ -1243,6 +1279,8 @@ async def run_history_replay(
                                         df_4h.iloc[-1]["open_time"],
                                     )
                                 ),
+                                entry_mode=setup_obj.entry_mode,
+                                entry_target_price=setup_obj.entry_target_price,
                             )
                         )
                         funnel["reversal_prepare_created"] += 1
@@ -1305,6 +1343,7 @@ async def run_history_replay(
                     funnel=funnel,
                     prepare_state=continuation_prepare_state,
                     ltf_expected=ltf_expected_for_htf(htf, cfg.entry),
+                    entry_mode=cfg.entry.mode,
                 )
                 if setup_obj is None or event is None:
                     funnel[f"continuation_{htf.lower()}_no_prepare_candidate"] += 1
@@ -1375,6 +1414,8 @@ async def run_history_replay(
                                 df_htf.iloc[-1]["open_time"],
                             )
                         ),
+                        entry_mode=setup_obj.entry_mode,
+                        entry_target_price=setup_obj.entry_target_price,
                     )
                 )
                 funnel[f"continuation_{htf.lower()}_prepare_created"] += 1
@@ -1504,6 +1545,9 @@ async def run_history_replay(
             if ltf_result.cascade_update is not None:
                 _apply_entry_cascade_update(setup, ltf_result.cascade_update)
                 funnel["entry_cascade_state_updated"] += 1
+            if ltf_result.advanced_update is not None:
+                _apply_advanced_entry_update(setup, ltf_result.advanced_update)
+                funnel["entry_advanced_state_updated"] += 1
             if ltf_result.status in {"NO_MATCHING_LTF", "LTF_NOT_CLOSED"}:
                 continue
 
@@ -1566,6 +1610,17 @@ async def run_history_replay(
                     continue
 
             entry = float(row["close"])
+            simple_stop, simple_stop_source = recommended_entry_stop(
+                entry=entry,
+                direction=setup.direction,
+                reset_level=choch.reset_level,
+                invalidation_price=setup.invalidation_price,
+            )
+            recommended_stop = (
+                float(ltf_result.recommended_stop)
+                if ltf_result.recommended_stop is not None
+                else simple_stop
+            )
             if int(setup.entry_count or 0) > 0 and not reentry_price_improved(
                 direction=setup.direction,
                 entry_price=entry,
@@ -1584,13 +1639,25 @@ async def run_history_replay(
                 if setup.is_liberal and cfg.paper_mode.liberal.enabled
                 else cfg.filters.min_rr
             )
-            levels, reject = finalize_entry_levels(
-                entry=entry,
-                direction=setup.direction,
-                invalidation_price=float(setup.invalidation_price),
-                compute_sl_tp=cfg.entry.compute_sl_tp,
-                min_rr=min_rr,
-            )
+            if ltf_result.recommended_stop is not None and ltf_result.target_price is not None:
+                levels = (
+                    {
+                        "sl": recommended_stop,
+                        "tp": float(ltf_result.target_price),
+                        "tp1": float(ltf_result.target_price),
+                    }
+                    if cfg.entry.compute_sl_tp
+                    else None
+                )
+                reject = None
+            else:
+                levels, reject = finalize_entry_levels(
+                    entry=entry,
+                    direction=setup.direction,
+                    invalidation_price=float(setup.invalidation_price),
+                    compute_sl_tp=cfg.entry.compute_sl_tp,
+                    min_rr=min_rr,
+                )
             if reject == "zero_risk":
                 funnel["entry_rejected_zero_risk"] += 1
                 continue
@@ -1630,6 +1697,11 @@ async def run_history_replay(
             setup.state = "CONFIRMED" if setup.entry_count >= max_entries_per_setup else "ARMED"
             if setup.state == "ARMED" and cascade_sequence_for_htf(setup.htf, cfg.entry):
                 _reset_entry_cascade(setup)
+            if setup.state == "ARMED" and str(getattr(setup, "entry_mode", "simple")) in {
+                "advanced",
+                "sweep_reclaim",
+            }:
+                _reset_advanced_entry(setup)
             if setup.state == "ARMED":
                 funnel["entry_sent_keep_setup_armed"] += 1
 
@@ -1656,7 +1728,18 @@ async def run_history_replay(
                     "confirm_bars_ago": int(choch.bars_ago),
                     "confirm_broken_open_ms": choch.broken_open_ms,
                     "confirm_reset_level": choch.reset_level,
+                    "entry_mode": str(getattr(setup, "entry_mode", "simple")),
+                    "recommended_stop": recommended_stop,
+                    "recommended_stop_source": (
+                        str(ltf_result.recommended_stop_source or "advanced")
+                        if ltf_result.recommended_stop is not None
+                        else simple_stop_source
+                    ),
                 }
+                if ltf_result.target_price is not None:
+                    ev["target_price"] = float(ltf_result.target_price)
+                if ltf_result.rr_to_target is not None:
+                    ev["rr_to_target"] = float(ltf_result.rr_to_target)
                 if sl is not None and tp is not None:
                     ev["sl"] = sl
                     ev["tp"] = tp

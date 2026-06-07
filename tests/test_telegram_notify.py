@@ -42,15 +42,19 @@ def test_entry_message_marks_reentry_vertically() -> None:
             "score": 70,
             "confirm_kind": "BOS",
             "confirm_level": 0.00735,
+            "recommended_stop": 0.0071,
+            "entry_mode": "advanced",
         },
     )
-    assert msg.splitlines()[:6] == [
+    assert msg.splitlines()[:8] == [
         "ENTRY",
         "ALTUSDT",
         "LONG",
+        "entry 0.0074",
+        "recommendedStop 0.0071",
         "invalidate 0.0069",
+        "mode advanced",
         "isReentry true",
-        "Score 70",
     ]
 
 
@@ -71,13 +75,17 @@ def test_entry_message_marks_primary_entry_vertically() -> None:
             "score": 60,
             "confirm_kind": "CHOCH",
             "confirm_level": 106700,
+            "recommended_stop": 106850,
+            "entry_mode": "simple",
         },
     )
-    assert msg.splitlines()[:6] == [
+    assert msg.splitlines()[:8] == [
         "ENTRY",
         "BTCUSDT",
         "SHORT",
+        "entry 106500",
+        "recommendedStop 106850",
         "invalidate 107000",
+        "mode simple",
         "isReentry false",
-        "Score 60",
     ]

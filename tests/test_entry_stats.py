@@ -108,6 +108,137 @@ def test_entry_stats_candidates_keep_latest_entry_per_setup() -> None:
     assert candidates[0].entry_price == 98
 
 
+def test_advanced_entry_stats_uses_recommended_stop_and_htf_target() -> None:
+    entry = _signal(
+        "entry-advanced",
+        "setup-advanced",
+        "ENTRY",
+        {
+            "setup_id": "setup-advanced",
+            "symbol": "BTCUSDT",
+            "direction": "LONG",
+            "entry_mode": "advanced",
+            "entry": 100,
+            "recommended_stop": 98,
+            "invalidation_price": 90,
+            "target_price": 110,
+            "impulse_end_price": 108,
+            "bar_open_ms": 1_000,
+            "entry_ltf": "5M",
+        },
+    )
+
+    candidate = build_entry_stats_candidates([entry], {}, set())[0]
+
+    assert candidate.target_price == 110
+    assert candidate.invalidation_price == 98
+
+
+def test_sweep_reclaim_stats_uses_recommended_stop() -> None:
+    candidate = build_entry_stats_candidates(
+        [
+            _signal(
+                "entry-sweep-reclaim",
+                "setup-sweep-reclaim",
+                "ENTRY",
+                {
+                    "setup_id": "setup-sweep-reclaim",
+                    "symbol": "HYPEUSDT",
+                    "direction": "LONG",
+                    "entry_mode": "sweep_reclaim",
+                    "entry": 100,
+                    "recommended_stop": 98,
+                    "invalidation_price": 90,
+                    "target_price": 110,
+                    "bar_open_ms": 1_000,
+                    "entry_ltf": "5M",
+                },
+            )
+        ],
+        {},
+        set(),
+    )[0]
+
+    assert candidate.invalidation_price == 98
+    assert candidate.target_price == 110
+
+
+def test_advanced_entry_stats_fails_on_recommended_stop_before_htf_target() -> None:
+    candidate = build_entry_stats_candidates(
+        [
+            _signal(
+                "entry-advanced",
+                "setup-advanced",
+                "ENTRY",
+                {
+                    "setup_id": "setup-advanced",
+                    "symbol": "BTCUSDT",
+                    "direction": "LONG",
+                    "entry_mode": "advanced",
+                    "entry": 100,
+                    "recommended_stop": 98,
+                    "invalidation_price": 90,
+                    "target_price": 110,
+                    "bar_open_ms": 1_000,
+                    "entry_ltf": "5M",
+                },
+            )
+        ],
+        {},
+        set(),
+    )[0]
+
+    result = evaluate_entry_stats_candidate(
+        candidate,
+        [
+            Candle(open_time=2_000, high=109, low=97.9),
+            Candle(open_time=3_000, high=111, low=100),
+        ],
+    )
+
+    assert result is not None
+    assert result.status == "FAIL"
+    assert result.outcome_open_ms == 2_000
+
+
+def test_advanced_entry_stats_succeeds_when_htf_target_updates_before_stop() -> None:
+    candidate = build_entry_stats_candidates(
+        [
+            _signal(
+                "entry-advanced-short",
+                "setup-advanced-short",
+                "ENTRY",
+                {
+                    "setup_id": "setup-advanced-short",
+                    "symbol": "ETHUSDT",
+                    "direction": "SHORT",
+                    "entry_mode": "advanced",
+                    "entry": 100,
+                    "recommended_stop": 102,
+                    "invalidation_price": 110,
+                    "target_price": 90,
+                    "bar_open_ms": 1_000,
+                    "entry_ltf": "5M",
+                },
+            )
+        ],
+        {},
+        set(),
+    )[0]
+
+    result = evaluate_entry_stats_candidate(
+        candidate,
+        [
+            Candle(open_time=2_000, high=101, low=89.9),
+            Candle(open_time=3_000, high=103, low=95),
+        ],
+    )
+
+    assert result is not None
+    assert result.status == "SUCCESS"
+    assert result.outcome_open_ms == 2_000
+
+
 def test_entry_stats_long_success_when_high_updates_impulse_max() -> None:
     candidate = build_entry_stats_candidates(
         [

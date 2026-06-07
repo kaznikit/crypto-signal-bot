@@ -44,6 +44,8 @@ def build_setup(
     entry_cascade_since_ms: int | None = None,
     entry_cascade_touch_ms: int | None = None,
     entry_cascade_retrace_level: float | None = None,
+    entry_mode: str = "simple",
+    entry_target_price: float | None = None,
 ) -> Setup:
     now = utcnow()
     return Setup(
@@ -70,6 +72,15 @@ def build_setup(
         entry_cascade_since_ms=entry_cascade_since_ms,
         entry_cascade_touch_ms=entry_cascade_touch_ms,
         entry_cascade_retrace_level=entry_cascade_retrace_level,
+        entry_mode=entry_mode,
+        entry_advanced_stage="WAIT_SWEEP",
+        entry_sweep_level=None,
+        entry_sweep_extreme=None,
+        entry_sweep_ms=None,
+        entry_reclaim_ms=None,
+        entry_confirm_level=None,
+        entry_confirm_ms=None,
+        entry_target_price=entry_target_price,
         created_at=now,
         updated_at=now,
         expires_at=now + timedelta(hours=ttl_hours),

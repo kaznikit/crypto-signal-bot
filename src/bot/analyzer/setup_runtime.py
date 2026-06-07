@@ -5,6 +5,7 @@ from typing import Any
 
 import pandas as pd
 
+from bot.analyzer.entry_advanced import AdvancedEntryUpdate, resolve_advanced_entry
 from bot.analyzer.entry_ltf import (
     cascade_sequence_for_htf,
     detect_entry_structure_confirm,
@@ -37,6 +38,11 @@ class LtfConfirmationResult:
     choch: LtfChoCh | None = None
     wait_suffix: str | None = None
     cascade_update: EntryCascadeUpdate | None = None
+    advanced_update: AdvancedEntryUpdate | None = None
+    recommended_stop: float | None = None
+    recommended_stop_source: str | None = None
+    target_price: float | None = None
+    rr_to_target: float | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -206,6 +212,45 @@ def resolve_ltf_confirmation(
     liberal_swing_override: dict[str, int] | None,
     use_close: bool,
 ) -> LtfConfirmationResult:
+    setup_mode = str(getattr(setup, "entry_mode", None) or entry.mode).lower()
+    if setup_mode in {"advanced", "sweep_reclaim"}:
+        series_keys = set(series.keys())
+        expected = [part.strip() for part in str(setup.ltf_expected).split("|") if part.strip()]
+        used_tf = finest_closed_ltf(
+            str(setup.ltf_expected),
+            closed_tfs=closed_tfs,
+            available=series_keys,
+        )
+        if used_tf is None:
+            if not any(tf in series_keys for tf in expected):
+                return LtfConfirmationResult(status="NO_MATCHING_LTF")
+            return LtfConfirmationResult(status="LTF_NOT_CLOSED")
+        ltf_df = series.get(used_tf)
+        if ltf_df is None or ltf_df.empty:
+            return LtfConfirmationResult(status="LTF_NOT_CLOSED")
+        advanced = resolve_advanced_entry(
+            setup=setup,
+            ltf_df=ltf_df,
+            used_tf=used_tf,
+            entry=entry,
+            pivot_swing_by_tf=pivot_swing_by_tf,
+            liberal_swing_override=liberal_swing_override,
+            use_close=use_close,
+        )
+        return LtfConfirmationResult(
+            status=advanced.status,
+            used_tf=used_tf,
+            ltf_df=ltf_df,
+            row=ltf_df.iloc[-1],
+            choch=advanced.choch,
+            wait_suffix=advanced.wait_suffix,
+            advanced_update=advanced.update,
+            recommended_stop=advanced.recommended_stop,
+            recommended_stop_source=advanced.recommended_stop_source,
+            target_price=advanced.target_price,
+            rr_to_target=advanced.rr_to_target,
+        )
+
     sequence = cascade_sequence_for_htf(str(setup.htf), entry)
     if sequence:
         return _resolve_cascade_ltf_confirmation(

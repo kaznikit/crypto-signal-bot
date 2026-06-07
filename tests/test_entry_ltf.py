@@ -27,6 +27,28 @@ def test_ltf_expected_uses_cascade_when_enabled() -> None:
     assert ltf_expected_for_htf("1H", entry) == "5M|1M"
 
 
+def test_ltf_expected_advanced_ignores_cascade() -> None:
+    entry = EntryConfig(
+        mode="advanced",
+        ltf_by_htf={"1H": "5M"},
+        cascade_enabled=True,
+        cascade_by_htf={"1H": "5M|1M"},
+    )
+
+    assert ltf_expected_for_htf("1H", entry) == "5M"
+
+
+def test_ltf_expected_sweep_reclaim_ignores_cascade() -> None:
+    entry = EntryConfig(
+        mode="sweep_reclaim",
+        ltf_by_htf={"1H": "5M"},
+        cascade_enabled=True,
+        cascade_by_htf={"1H": "5M|1M"},
+    )
+
+    assert ltf_expected_for_htf("1H", entry) == "5M"
+
+
 def test_finest_closed_ltf_picks_5m_when_closed() -> None:
     assert (
         finest_closed_ltf(

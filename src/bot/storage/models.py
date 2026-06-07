@@ -65,6 +65,17 @@ class Setup(Base):
     entry_cascade_touch_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # Уровень 0.5 предыдущего TF-импульса.
     entry_cascade_retrace_level: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Режим ENTRY фиксируется при создании setup, чтобы смена конфига не меняла активный setup.
+    entry_mode: Mapped[str] = mapped_column(String(16), default="simple")
+    # Состояние advanced ENTRY FSM.
+    entry_advanced_stage: Mapped[str] = mapped_column(String(32), default="WAIT_SWEEP")
+    entry_sweep_level: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_sweep_extreme: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_sweep_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entry_reclaim_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entry_confirm_level: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_confirm_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entry_target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

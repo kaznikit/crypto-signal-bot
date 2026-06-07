@@ -15,7 +15,12 @@ from bot.analyzer.entry_ltf import (
     ltf_expected_for_htf,
     prepare_since_open_ms,
 )
-from bot.analyzer.filters import atr_percent, close_beyond_level, finalize_entry_levels
+from bot.analyzer.filters import (
+    atr_percent,
+    close_beyond_level,
+    finalize_entry_levels,
+    recommended_entry_stop,
+)
 from bot.analyzer.reentry import (
     reentry_has_new_structure_break,
     reentry_price_improved,
@@ -83,6 +88,26 @@ def _reset_entry_cascade(setup: Any) -> None:
     setup.entry_cascade_retrace_level = None
 
 
+def _apply_advanced_entry_update(setup: Any, update: Any) -> None:
+    setup.entry_advanced_stage = str(update.stage)
+    setup.entry_sweep_level = update.sweep_level
+    setup.entry_sweep_extreme = update.sweep_extreme
+    setup.entry_sweep_ms = update.sweep_ms
+    setup.entry_reclaim_ms = update.reclaim_ms
+    setup.entry_confirm_level = update.confirm_level
+    setup.entry_confirm_ms = update.confirm_ms
+
+
+def _reset_advanced_entry(setup: Any) -> None:
+    setup.entry_advanced_stage = "WAIT_SWEEP"
+    setup.entry_sweep_level = None
+    setup.entry_sweep_extreme = None
+    setup.entry_sweep_ms = None
+    setup.entry_reclaim_ms = None
+    setup.entry_confirm_level = None
+    setup.entry_confirm_ms = None
+
+
 def _entry_tfs_for_setup(setup: Any) -> set[str]:
     configured = {
         tf.strip()
@@ -93,6 +118,8 @@ def _entry_tfs_for_setup(setup: Any) -> set[str]:
 
 
 def _current_entry_tfs_for_setup(setup: Any, entry_cfg: Any) -> set[str]:
+    if str(getattr(setup, "entry_mode", "simple")).lower() in {"advanced", "sweep_reclaim"}:
+        return _entry_tfs_for_setup(setup)
     sequence = cascade_sequence_for_htf(str(setup.htf), entry_cfg)
     if not sequence:
         return _entry_tfs_for_setup(setup)
@@ -383,6 +410,7 @@ class SignalBotApp:
             impulse_max_age_bars=self._cfg.pivots.impulse_max_age_bars,
             bos_use_close=self._cfg.pivots.bos_use_close,
             ltf_expected=rev_ltf,
+            entry_mode=self._cfg.entry.mode,
         )
         liberal_wider_choch = False
         if (setup is None or event is None) and liberal_cfg.enabled:
@@ -396,6 +424,7 @@ class SignalBotApp:
                 impulse_max_age_bars=self._cfg.pivots.impulse_max_age_bars,
                 bos_use_close=self._cfg.pivots.bos_use_close,
                 ltf_expected=rev_ltf,
+                entry_mode=self._cfg.entry.mode,
             )
             liberal_wider_choch = setup is not None
         if setup is None or event is None:
@@ -504,6 +533,7 @@ class SignalBotApp:
             bos_use_close=self._cfg.pivots.bos_use_close,
             ttl_hours=24,
             ltf_expected=ltf_expected_for_htf(htf, self._cfg.entry),
+            entry_mode=self._cfg.entry.mode,
         )
         if setup is None or event is None:
             funnel[f"continuation_{htf.lower()}_no_prepare_candidate"] += 1
@@ -668,6 +698,11 @@ class SignalBotApp:
                 setup.updated_at = utcnow()
                 self._repo.upsert_setup(setup)
                 funnel["entry_cascade_state_updated"] += 1
+            if ltf_result.advanced_update is not None:
+                _apply_advanced_entry_update(setup, ltf_result.advanced_update)
+                setup.updated_at = utcnow()
+                self._repo.upsert_setup(setup)
+                funnel["entry_advanced_state_updated"] += 1
             if ltf_result.status == "NO_MATCHING_LTF":
                 funnel["active_setup_no_matching_ltf"] += 1
                 continue
@@ -768,6 +803,28 @@ class SignalBotApp:
                         continue
 
                 entry_price = float(row["close"])
+                simple_stop, simple_stop_source = recommended_entry_stop(
+                    entry=entry_price,
+                    direction=setup.direction,
+                    reset_level=choch.reset_level,
+                    invalidation_price=setup.invalidation_price,
+                )
+                recommended_stop = (
+                    float(ltf_result.recommended_stop)
+                    if ltf_result.recommended_stop is not None
+                    else simple_stop
+                )
+                payload["entry_mode"] = str(getattr(setup, "entry_mode", "simple"))
+                payload["recommended_stop"] = recommended_stop
+                payload["recommended_stop_source"] = (
+                    str(ltf_result.recommended_stop_source or "advanced")
+                    if ltf_result.recommended_stop is not None
+                    else simple_stop_source
+                )
+                if ltf_result.target_price is not None:
+                    payload["target_price"] = float(ltf_result.target_price)
+                if ltf_result.rr_to_target is not None:
+                    payload["rr_to_target"] = float(ltf_result.rr_to_target)
                 if int(setup.entry_count or 0) > 0 and not reentry_price_improved(
                     direction=setup.direction,
                     entry_price=entry_price,
@@ -780,13 +837,25 @@ class SignalBotApp:
                     if setup.is_liberal and liberal_cfg.enabled
                     else self._cfg.filters.min_rr
                 )
-                levels, reject = finalize_entry_levels(
-                    entry=entry_price,
-                    direction=setup.direction,
-                    invalidation_price=setup.invalidation_price,
-                    compute_sl_tp=self._cfg.entry.compute_sl_tp,
-                    min_rr=min_rr,
-                )
+                if ltf_result.recommended_stop is not None and ltf_result.target_price is not None:
+                    levels = (
+                        {
+                            "sl": recommended_stop,
+                            "tp": float(ltf_result.target_price),
+                            "tp1": float(ltf_result.target_price),
+                        }
+                        if self._cfg.entry.compute_sl_tp
+                        else None
+                    )
+                    reject = None
+                else:
+                    levels, reject = finalize_entry_levels(
+                        entry=entry_price,
+                        direction=setup.direction,
+                        invalidation_price=setup.invalidation_price,
+                        compute_sl_tp=self._cfg.entry.compute_sl_tp,
+                        min_rr=min_rr,
+                    )
                 if reject == "zero_risk":
                     funnel["entry_rejected_zero_risk"] += 1
                     continue
@@ -819,6 +888,11 @@ class SignalBotApp:
                 )
                 if setup.state == "ARMED" and cascade_sequence_for_htf(setup.htf, self._cfg.entry):
                     _reset_entry_cascade(setup)
+                if setup.state == "ARMED" and str(getattr(setup, "entry_mode", "simple")) in {
+                    "advanced",
+                    "sweep_reclaim",
+                }:
+                    _reset_advanced_entry(setup)
                 setup.updated_at = utcnow()
                 self._repo.upsert_setup(setup)
                 if setup.state == "ARMED":
