@@ -39,7 +39,7 @@ entry:
     "15M": 6
     "1H": 8
   ltf_swing_use_pivot_sizes: false
-  max_entries_per_setup: 2
+  max_entries_per_setup: 1
   ltf_max_bars_ago: 24
   ltf_max_bars_ago_by_tf:
     "1M": 120
@@ -51,7 +51,7 @@ entry:
   confirm_structure_kinds: [CHOCH, BOS]
   structure_lookback: since_prepare
   confirm_mode: structure_break
-  cascade_enabled: true
+  cascade_enabled: false
   cascade_by_htf:
     "1H": "5M|1M"
   cascade_confirm_structure_kinds: [BOS, CHOCH]
@@ -71,6 +71,24 @@ entry:
     stop_buffer_atr: 0.15
     max_stop_atr: 1.5
     min_rr_to_htf_target: 3.0
+  fib_dca:
+    monitoring_tf_by_htf:
+      "4H": "5M"
+      "1H": "5M"
+      "15M": "5M"
+    levels:
+      - fib: 0.5
+        weight_pct: 40
+      - fib: 0.618
+        weight_pct: 30
+      - fib: 0.705
+        weight_pct: 20
+      - fib: 0.786
+        weight_pct: 10
+    stop_source: htf_invalidation
+    target_source: impulse_end
+    cancel_remaining_on_target: true
+    cancel_remaining_on_opposite_structure: true
 filters:
   min_atr_pct: 0.3
   min_rr: 1.5
@@ -102,6 +120,17 @@ entry_stats:
   enabled: true
   check_interval_hours: 24
   max_candidates_per_run: 25
+prepare_stats:
+  enabled: true
+  check_interval_hours: 24
+  max_candidates_per_run: 25
+  evaluation_tf_by_htf:
+    "4H": "5M"
+    "1H": "5M"
+    "15M": "1M"
+  fib_levels: []
+  target_source: impulse_end
+  invalidation_source: setup_invalidation
 strategy_features:
   require_liquidity_grab_reversal: false
   quality_score_enabled: true

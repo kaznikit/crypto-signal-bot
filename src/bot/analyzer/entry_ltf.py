@@ -12,8 +12,8 @@ from bot.market.pivots import (
 
 # Дефолты, если в конфиге нет ключа для HTF.
 DEFAULT_LTF_BY_HTF: dict[str, str] = {
-    "4H": "5M|15M|1H",
-    "1H": "5M|15M",
+    "4H": "5M",
+    "1H": "5M",
     "15M": "5M",
 }
 

@@ -2,12 +2,14 @@ import pandas as pd
 
 from bot.history_replay import (
     ClosedTrade,
+    FibOpenPosition,
     OpenTrade,
     _collapse_impulse_fanout_by_start,
     _emit_fresh_pivot_events,
     _dedupe_overlay_events,
     _filter_invalidated_impulses,
     _filter_stale_structure_events,
+    _has_open_position,
     _invalidate_armed_replay_setups_by_key,
     _keep_single_retrace_pivot_per_leg,
     _max_drawdown_r,
@@ -57,6 +59,36 @@ def test_resolve_trade_exit_short_sl_hit() -> None:
     assert exit_price == 101.0
     assert r_mult == -1.0
     assert reason == "sl"
+
+
+def test_open_position_blocks_other_setup_but_allows_own_fib_fills() -> None:
+    fib_position = FibOpenPosition(
+        setup_id="fib-1",
+        symbol="BTCUSDT",
+        setup_type="CONTINUATION",
+        direction="LONG",
+        tf="5M",
+        entry_time=1,
+        plan=[],
+        filled_fibs={0.5},
+        sl=90,
+        tp=110,
+    )
+
+    assert _has_open_position([], {"fib-1": fib_position}) is True
+    assert _has_open_position([], {"fib-1": fib_position}, setup_id="fib-1") is False
+    assert _has_open_position([], {"fib-1": fib_position}, setup_id="other") is True
+
+
+def test_dedupe_overlay_events_collapses_duplicate_invalidation() -> None:
+    events = [
+        {"kind": "INVALIDATED", "setup_id": "s1", "bar_open_ms": 1_000},
+        {"kind": "INVALIDATED", "setup_id": "s1", "bar_open_ms": 1_000},
+    ]
+
+    _dedupe_overlay_events(events)
+
+    assert len(events) == 1
 
 
 def test_max_drawdown_r() -> None:

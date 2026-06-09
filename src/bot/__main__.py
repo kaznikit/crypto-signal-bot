@@ -15,6 +15,17 @@ from bot.analyzer.entry_ltf import (
     ltf_expected_for_htf,
     prepare_since_open_ms,
 )
+from bot.analyzer.fib_dca import (
+    deserialize_filled_fibs,
+    deserialize_plan,
+    filled_weight_pct,
+    initial_trigger_fills,
+    initialize_fib_dca_setup,
+    new_fib_dca_fills,
+    serialize_filled_fibs,
+    target_reached,
+    weighted_average_entry,
+)
 from bot.analyzer.filters import (
     atr_percent,
     close_beyond_level,
@@ -50,6 +61,11 @@ from bot.exchange.bybit_client import INTERVAL_MS_MAP, BybitClient
 from bot.market.candles import candles_to_df
 from bot.market.pivots import extract_structure_breaks_htf
 from bot.notify.telegram import TelegramNotifier
+from bot.prepare_stats import (
+    build_prepare_stats_candidates,
+    evaluate_prepare_stats_candidate,
+    format_prepare_stats_messages,
+)
 from bot.scheduler import TimeframeScheduler
 from bot.storage.models import Signal, SignalKind
 from bot.storage.repo import Repository
@@ -60,6 +76,8 @@ logger = logging.getLogger(__name__)
 
 ENTRY_STATS_LAST_RUN_KEY = "entry_stats_last_run"
 ENTRY_STATS_PROCESSED_KEY = "entry_stats_processed"
+PREPARE_STATS_LAST_RUN_KEY = "prepare_stats_last_run"
+PREPARE_STATS_PROCESSED_KEY = "prepare_stats_processed"
 
 
 def _enrich_prepare_payload(
@@ -118,6 +136,13 @@ def _entry_tfs_for_setup(setup: Any) -> set[str]:
 
 
 def _current_entry_tfs_for_setup(setup: Any, entry_cfg: Any) -> set[str]:
+    active_trade_tf = getattr(setup, "active_trade_tf", None)
+    if active_trade_tf:
+        return {str(active_trade_tf)}
+    if str(getattr(setup, "entry_mode", "simple")).lower() == "fib_dca":
+        return {
+            str(entry_cfg.fib_dca.monitoring_tf_by_htf.get(str(setup.htf), str(setup.htf)))
+        }
     if str(getattr(setup, "entry_mode", "simple")).lower() in {"advanced", "sweep_reclaim"}:
         return _entry_tfs_for_setup(setup)
     sequence = cascade_sequence_for_htf(str(setup.htf), entry_cfg)
@@ -178,6 +203,7 @@ class SignalBotApp:
 
     async def tick(self) -> None:
         await self._maybe_process_entry_stats()
+        await self._maybe_process_prepare_stats()
         closed_tfs = self._scheduler.closed_timeframes()
         if not closed_tfs:
             return
@@ -300,6 +326,84 @@ class SignalBotApp:
             await asyncio.sleep(0.03)
         results.sort(key=lambda result: result.outcome_open_ms)
         return results
+
+    async def _maybe_process_prepare_stats(self) -> None:
+        stats_cfg = self._cfg.prepare_stats
+        if not stats_cfg.enabled:
+            return
+        interval = timedelta(hours=max(1, int(stats_cfg.check_interval_hours)))
+        state = self._repo.get_state_value(PREPARE_STATS_LAST_RUN_KEY)
+        now = utcnow()
+        if state and state.get("last_run"):
+            try:
+                last_run = ensure_utc(datetime.fromisoformat(state["last_run"]))
+            except ValueError:
+                last_run = now - interval
+            if now - last_run < interval:
+                return
+
+        try:
+            results, fib_levels = await self._collect_prepare_stats()
+        except Exception:
+            logger.exception("Prepare stats processing failed")
+            self._repo.set_state_value(PREPARE_STATS_LAST_RUN_KEY, {"last_run": now.isoformat()})
+            return
+        if results:
+            try:
+                for message in format_prepare_stats_messages(results, fib_levels=fib_levels):
+                    await self._notifier.send_entry_stats(
+                        message,
+                        paper_mode=self._cfg.paper_mode.enabled,
+                    )
+            except Exception:
+                logger.exception("Prepare stats notification failed")
+                self._repo.set_state_value(
+                    PREPARE_STATS_LAST_RUN_KEY,
+                    {"last_run": now.isoformat()},
+                )
+                return
+            processed = self._repo.get_state_value(PREPARE_STATS_PROCESSED_KEY) or {}
+            for result in results:
+                processed[result.signal_id] = result.status
+            self._repo.set_state_value(PREPARE_STATS_PROCESSED_KEY, processed)
+            logger.info("Prepare stats sent | count=%s", len(results))
+        self._repo.set_state_value(PREPARE_STATS_LAST_RUN_KEY, {"last_run": now.isoformat()})
+
+    async def _collect_prepare_stats(self) -> tuple[list[Any], list[float]]:
+        stats_cfg = self._cfg.prepare_stats
+        fib_levels = (
+            [float(fib) for fib in stats_cfg.fib_levels]
+            if stats_cfg.fib_levels
+            else [float(level.fib) for level in self._cfg.entry.fib_dca.levels]
+        )
+        signals = self._repo.load_signals_by_kind(("PREPARE",))
+        processed = self._repo.get_state_value(PREPARE_STATS_PROCESSED_KEY) or {}
+        candidates = build_prepare_stats_candidates(
+            signals,
+            processed_signal_ids=set(processed.keys()),
+            fib_levels=fib_levels,
+            evaluation_tf_by_htf=stats_cfg.evaluation_tf_by_htf,
+        )
+        candidates = candidates[: max(1, int(stats_cfg.max_candidates_per_run))]
+        results: list[Any] = []
+        now_ms = int(utcnow().timestamp() * 1000)
+        for candidate in candidates:
+            timeframe = (
+                candidate.timeframe if candidate.timeframe in INTERVAL_MS_MAP else candidate.htf
+            )
+            tf_ms = INTERVAL_MS_MAP.get(timeframe, INTERVAL_MS_MAP["5M"])
+            limit = max(2, int((now_ms - candidate.prepare_open_ms) / tf_ms) + 5)
+            candles = await self._bybit.fetch_klines(
+                symbol=candidate.symbol,
+                timeframe=timeframe,
+                limit=limit,
+            )
+            result = evaluate_prepare_stats_candidate(candidate, candles)
+            if result is not None:
+                results.append(result)
+            await asyncio.sleep(0.03)
+        results.sort(key=lambda result: result.outcome_open_ms)
+        return results, fib_levels
 
     async def _process_symbol(self, symbol: str, closed_tfs: list[str]) -> Counter[str]:
         funnel: Counter[str] = Counter()
@@ -430,6 +534,11 @@ class SignalBotApp:
         if setup is None or event is None:
             funnel["reversal_no_prepare_candidate"] += 1
             return
+        initialize_fib_dca_setup(
+            setup=setup,
+            prepare_payload=event.payload,
+            config=self._cfg.entry.fib_dca,
+        )
 
         dedup_key = (symbol, setup.type, "4H", setup.direction)
         if dedup_key in armed_keys:
@@ -538,6 +647,11 @@ class SignalBotApp:
         if setup is None or event is None:
             funnel[f"continuation_{htf.lower()}_no_prepare_candidate"] += 1
             return
+        initialize_fib_dca_setup(
+            setup=setup,
+            prepare_payload=event.payload,
+            config=self._cfg.entry.fib_dca,
+        )
 
         dedup_key = (symbol, setup.type, htf, setup.direction)
         if dedup_key in armed_keys:
@@ -628,11 +742,53 @@ class SignalBotApp:
         liberal_cfg = self._cfg.paper_mode.liberal
         max_entries_per_setup = max(1, int(self._cfg.entry.max_entries_per_setup))
         htf_breaks_cache: dict[str, list[Any]] = {}
+        position_setup_id = next(
+            (
+                setup.id
+                for setup in active
+                if getattr(setup, "active_trade_stop_price", None) is not None
+                or (
+                    str(getattr(setup, "entry_mode", "simple")).lower() == "fib_dca"
+                    and bool(
+                        deserialize_filled_fibs(getattr(setup, "fib_dca_filled_json", None))
+                    )
+                )
+            ),
+            None,
+        )
         if active and not series:
             funnel["active_setups_waiting_no_fresh_ltf"] += len(active)
 
         for setup in active:
             if setup.state != "ARMED":
+                continue
+            if position_setup_id is not None and setup.id != position_setup_id:
+                funnel["entry_skipped_open_position"] += 1
+                continue
+
+            if getattr(setup, "active_trade_stop_price", None) is not None:
+                await self._advance_open_trade(
+                    setup=setup,
+                    symbol=symbol,
+                    series=series,
+                    closed_tfs=closed_tfs,
+                    funnel=funnel,
+                )
+                continue
+
+            setup_entry_mode = str(getattr(setup, "entry_mode", "simple")).lower()
+            if setup_entry_mode == "fib_dca" and deserialize_filled_fibs(
+                getattr(setup, "fib_dca_filled_json", None)
+            ):
+                # Filled DCA levels are one open position. Keep monitoring and
+                # filling that position until its actual target or stop.
+                await self._advance_fib_dca_setup(
+                    setup=setup,
+                    symbol=symbol,
+                    series=series,
+                    closed_tfs=closed_tfs,
+                    funnel=funnel,
+                )
                 continue
 
             htf_df = series.get(setup.htf)
@@ -661,10 +817,19 @@ class SignalBotApp:
                 if raw_action == "RESET_SAME_DIRECTION" and decision.action == "KEEP":
                     funnel["setup_reset_same_direction_skipped_before_first_entry"] += 1
                 if decision.action == "INVALIDATE_OPPOSITE":
-                    self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
-                    funnel["setup_invalidated_by_opposite_structure"] += 1
-                    funnel[f"setup_invalidated_by_opposite_structure_{setup.htf.lower()}"] += 1
-                    continue
+                    keep_fib_dca = (
+                        str(getattr(setup, "entry_mode", "simple")).lower() == "fib_dca"
+                        and not self._cfg.entry.fib_dca.cancel_remaining_on_opposite_structure
+                    )
+                    if keep_fib_dca:
+                        funnel["fib_dca_kept_after_opposite_structure"] += 1
+                    else:
+                        self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
+                        funnel["setup_invalidated_by_opposite_structure"] += 1
+                        funnel[
+                            f"setup_invalidated_by_opposite_structure_{setup.htf.lower()}"
+                        ] += 1
+                        continue
                 if decision.action == "RESET_SAME_DIRECTION":
                     self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
                     funnel["setup_reset_by_new_structure_same_direction"] += 1
@@ -677,9 +842,30 @@ class SignalBotApp:
                 entry=self._cfg.entry,
             )
             if inv_result.invalidated:
+                row = inv_result.row
+                if row is not None:
+                    await self._send_invalidated_event(
+                        setup=setup,
+                        symbol=symbol,
+                        timeframe=inv_result.inv_tf,
+                        bar_open_ms=int(row["open_time"]),
+                        mark_price=float(setup.invalidation_price),
+                    )
                 self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
                 funnel["setup_invalidated_on_tf"] += 1
                 funnel[f"setup_invalidated_on_{inv_result.inv_tf.lower()}"] += 1
+                continue
+
+            if setup_entry_mode == "fib_dca":
+                await self._advance_fib_dca_setup(
+                    setup=setup,
+                    symbol=symbol,
+                    series=series,
+                    closed_tfs=closed_tfs,
+                    funnel=funnel,
+                )
+                if deserialize_filled_fibs(getattr(setup, "fib_dca_filled_json", None)):
+                    position_setup_id = setup.id
                 continue
 
             ltf_result = resolve_ltf_confirmation(
@@ -823,6 +1009,8 @@ class SignalBotApp:
                 )
                 if ltf_result.target_price is not None:
                     payload["target_price"] = float(ltf_result.target_price)
+                elif setup.entry_target_price is not None:
+                    payload["target_price"] = float(setup.entry_target_price)
                 if ltf_result.rr_to_target is not None:
                     payload["rr_to_target"] = float(ltf_result.rr_to_target)
                 if int(setup.entry_count or 0) > 0 and not reentry_price_improved(
@@ -883,20 +1071,18 @@ class SignalBotApp:
                 setup.last_entry_swing_level = (
                     float(choch.reset_level) if choch.reset_level is not None else None
                 )
-                setup.state = (
-                    "CONFIRMED" if int(setup.entry_count) >= max_entries_per_setup else "ARMED"
+                setup.active_trade_stop_price = recommended_stop
+                setup.active_trade_target_price = float(
+                    payload.get("target_price")
+                    or payload.get("tp")
+                    or setup.entry_target_price
                 )
-                if setup.state == "ARMED" and cascade_sequence_for_htf(setup.htf, self._cfg.entry):
-                    _reset_entry_cascade(setup)
-                if setup.state == "ARMED" and str(getattr(setup, "entry_mode", "simple")) in {
-                    "advanced",
-                    "sweep_reclaim",
-                }:
-                    _reset_advanced_entry(setup)
+                setup.active_trade_tf = used_tf
+                setup.state = "ARMED"
+                position_setup_id = setup.id
                 setup.updated_at = utcnow()
                 self._repo.upsert_setup(setup)
-                if setup.state == "ARMED":
-                    funnel["entry_sent_keep_setup_armed"] += 1
+                funnel["entry_sent_keep_setup_armed"] += 1
                 funnel["entry_sent"] += 1
             elif event.kind == "INVALIDATED":
                 payload["invalidation_price"] = setup.invalidation_price
@@ -913,6 +1099,216 @@ class SignalBotApp:
                 funnel["invalidated_sent"] += 1
             elif state != setup.state:
                 self._repo.mark_setup_state(setup.id, state, utcnow())
+
+    async def _send_invalidated_event(
+        self,
+        *,
+        setup: Any,
+        symbol: str,
+        timeframe: str,
+        bar_open_ms: int,
+        mark_price: float,
+    ) -> None:
+        payload = {
+            "setup_id": setup.id,
+            "symbol": symbol,
+            "type": setup.type,
+            "direction": setup.direction,
+            "htf": timeframe,
+            "setup_htf": setup.htf,
+            "bar_open_ms": bar_open_ms,
+            "invalidation_price": float(setup.invalidation_price),
+            "mark_price": mark_price,
+            "liberal": setup.is_liberal,
+        }
+        signal_row = await self._notifier.send_event(
+            kind=SignalKind.INVALIDATED,
+            payload=payload,
+            close_time=bar_open_ms,
+            paper_mode=self._cfg.paper_mode.enabled,
+            liberal_paper_only=bool(setup.is_liberal),
+        )
+        if signal_row is not None:
+            self._repo.save_signal(signal_row)
+
+    async def _advance_open_trade(
+        self,
+        *,
+        setup: Any,
+        symbol: str,
+        series: dict[str, Any],
+        closed_tfs: list[str],
+        funnel: Counter[str],
+    ) -> None:
+        trade_tf = str(getattr(setup, "active_trade_tf", None) or setup.htf)
+        df = series.get(trade_tf)
+        if trade_tf not in set(closed_tfs) or df is None or df.empty:
+            funnel["active_trade_tf_not_closed"] += 1
+            return
+        row = df.iloc[-1]
+        low = float(row["low"])
+        high = float(row["high"])
+        stop = float(setup.active_trade_stop_price)
+        target = float(setup.active_trade_target_price)
+        hit_stop = low <= stop if setup.direction == "LONG" else high >= stop
+        hit_target = high >= target if setup.direction == "LONG" else low <= target
+        if hit_stop:
+            bar_open_ms = int(row["open_time"])
+            await self._send_invalidated_event(
+                setup=setup,
+                symbol=symbol,
+                timeframe=trade_tf,
+                bar_open_ms=bar_open_ms,
+                mark_price=stop,
+            )
+            self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
+            funnel["active_trade_stopped"] += 1
+            return
+        if hit_target:
+            self._repo.mark_setup_state(setup.id, "CONFIRMED", utcnow())
+            funnel["active_trade_target_reached"] += 1
+            return
+        funnel["active_trade_open"] += 1
+
+    async def _advance_fib_dca_setup(
+        self,
+        *,
+        setup: Any,
+        symbol: str,
+        series: dict[str, Any],
+        closed_tfs: list[str],
+        funnel: Counter[str],
+    ) -> None:
+        plan = deserialize_plan(getattr(setup, "fib_dca_plan_json", None))
+        if not plan:
+            funnel["fib_dca_missing_plan"] += 1
+            return
+
+        monitor_tf = str(
+            self._cfg.entry.fib_dca.monitoring_tf_by_htf.get(str(setup.htf), str(setup.htf))
+        )
+        used_tf = monitor_tf
+        df = series.get(monitor_tf) if monitor_tf in set(closed_tfs) else None
+        if df is None or df.empty:
+            htf_df = series.get(setup.htf)
+            if htf_df is None or htf_df.empty or setup.htf not in set(closed_tfs):
+                funnel["fib_dca_monitor_not_closed"] += 1
+                return
+            # The PREPARE bar itself is sufficient to fill the trigger level.
+            if int(htf_df.iloc[-1]["open_time"]) != int(prepare_since_open_ms(setup)):
+                funnel["fib_dca_monitor_not_closed"] += 1
+                return
+            df = htf_df
+            used_tf = str(setup.htf)
+
+        row = df.iloc[-1]
+        bar_open_ms = int(row["open_time"])
+        low = float(row["low"])
+        high = float(row["high"])
+        filled = deserialize_filled_fibs(getattr(setup, "fib_dca_filled_json", None))
+        fills = new_fib_dca_fills(
+            direction=str(setup.direction),
+            plan=plan,
+            filled_fibs=filled,
+            price_low=low,
+            price_high=high,
+        )
+        initial_fills = initial_trigger_fills(
+            plan=plan,
+            filled_fibs=filled,
+            trigger_price=float(setup.origin_price),
+        )
+        fills = list({level.fib: level for level in [*initial_fills, *fills]}.values())
+
+        invalidated = (
+            low <= float(setup.invalidation_price)
+            if str(setup.direction) == "LONG"
+            else high >= float(setup.invalidation_price)
+        )
+        if invalidated:
+            await self._send_invalidated_event(
+                setup=setup,
+                symbol=symbol,
+                timeframe=used_tf,
+                bar_open_ms=bar_open_ms,
+                mark_price=float(setup.invalidation_price),
+            )
+            self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
+            funnel["fib_dca_invalidated_on_monitor_tf"] += 1
+            return
+
+        changed = False
+        for level in fills:
+            next_filled = {*filled, level.fib}
+            average_entry = weighted_average_entry(plan, next_filled)
+            total_weight = filled_weight_pct(plan, next_filled)
+            payload: dict[str, Any] = {
+                "setup_id": setup.id,
+                "symbol": symbol,
+                "type": setup.type,
+                "direction": setup.direction,
+                "htf": used_tf,
+                "entry_ltf": used_tf,
+                "setup_htf": setup.htf,
+                "bar_open_ms": bar_open_ms,
+                "entry": level.price,
+                "entry_mode": "fib_dca",
+                "fib": level.fib,
+                "weight_pct": level.weight_pct,
+                "filled_weight_pct": total_weight,
+                "average_entry": average_entry,
+                "entry_index": len(next_filled),
+                "entries_max": len(plan),
+                "recommended_stop": float(setup.invalidation_price),
+                "recommended_stop_source": "htf_invalidation",
+                "invalidation_price": float(setup.invalidation_price),
+                "target_price": float(setup.entry_target_price),
+                "score": setup.score,
+                "liberal": setup.is_liberal,
+                "signal_discriminator": f"fib:{level.fib}",
+            }
+            signal_row = await self._notifier.send_event(
+                kind=SignalKind.ENTRY,
+                payload=payload,
+                close_time=bar_open_ms,
+                paper_mode=self._cfg.paper_mode.enabled,
+                liberal_paper_only=bool(setup.is_liberal),
+            )
+            if signal_row is None:
+                funnel["fib_dca_entry_send_skipped"] += 1
+                continue
+            self._repo.save_signal(signal_row)
+            filled = next_filled
+            setup.fib_dca_filled_json = serialize_filled_fibs(filled)
+            setup.fib_dca_average_entry = average_entry
+            setup.fib_dca_filled_weight_pct = total_weight
+            setup.fib_dca_last_fill_ms = bar_open_ms
+            setup.entry_count = len(filled)
+            setup.last_entry_bar_ms = bar_open_ms
+            setup.last_entry_price = level.price
+            changed = True
+            funnel["fib_dca_entry_sent"] += 1
+            funnel[f"fib_dca_entry_{level.fib:g}"] += 1
+
+        target = getattr(setup, "entry_target_price", None)
+        if (
+            self._cfg.entry.fib_dca.cancel_remaining_on_target
+            and target is not None
+            and bar_open_ms > int(prepare_since_open_ms(setup))
+            and target_reached(
+                direction=str(setup.direction),
+                target_price=float(target),
+                price_low=low,
+                price_high=high,
+            )
+        ):
+            setup.state = "CONFIRMED"
+            changed = True
+            funnel["fib_dca_target_reached"] += 1
+
+        if changed:
+            setup.updated_at = utcnow()
+            self._repo.upsert_setup(setup)
 
 
 async def _main() -> None:

@@ -15,9 +15,21 @@ from bot.analyzer.continuation import (
     detect_continuation_prepare,
 )
 from bot.analyzer.entry_ltf import (
-    cascade_sequence_for_htf,
     ltf_expected_for_htf,
     prepare_since_open_ms,
+)
+from bot.analyzer.fib_dca import (
+    FibDcaLevel,
+    deserialize_filled_fibs,
+    deserialize_plan,
+    filled_weight_pct,
+    initial_trigger_fills,
+    initialize_fib_dca_setup,
+    new_fib_dca_fills,
+    planned_risk,
+    position_pnl,
+    serialize_filled_fibs,
+    weighted_average_entry,
 )
 from bot.analyzer.filters import (
     atr_percent,
@@ -31,8 +43,10 @@ from bot.analyzer.reentry import (
     reentry_swing_reset_reached,
 )
 from bot.analyzer.reversal import detect_reversal_prepare
-from bot.analyzer.setup_lifecycle import decide_setup_structure_transition
-from bot.analyzer.setup_lifecycle import apply_reset_after_first_entry_policy
+from bot.analyzer.setup_lifecycle import (
+    apply_reset_after_first_entry_policy,
+    decide_setup_structure_transition,
+)
 from bot.analyzer.setup_runtime import check_price_invalidation, resolve_ltf_confirmation
 from bot.analyzer.strategy_gates import (
     evaluate_continuation_prepare_detailed,
@@ -101,6 +115,11 @@ class ReplaySetup:
     entry_confirm_level: float | None = None
     entry_confirm_ms: int | None = None
     entry_target_price: float | None = None
+    fib_dca_plan_json: str | None = None
+    fib_dca_filled_json: str | None = None
+    fib_dca_average_entry: float | None = None
+    fib_dca_filled_weight_pct: float = 0.0
+    fib_dca_last_fill_ms: int | None = None
 
 
 @dataclass(slots=True)
@@ -115,6 +134,20 @@ class OpenTrade:
     sl: float
     tp: float
     risk: float
+
+
+@dataclass(slots=True)
+class FibOpenPosition:
+    setup_id: str
+    symbol: str
+    setup_type: str
+    direction: str
+    tf: str
+    entry_time: int
+    plan: list[FibDcaLevel]
+    filled_fibs: set[float]
+    sl: float
+    tp: float
 
 
 @dataclass(slots=True)
@@ -173,11 +206,14 @@ def _load_timeframes(
 
     if "reversal" in replay_targets:
         needed.add("4H")
-        needed.update(
-            tf
-            for tf in str(ltf_expected_for_htf("4H", cfg.entry)).split("|")
-            if tf and tf in TF_MS
-        )
+        if cfg.entry.mode == "fib_dca":
+            needed.add(str(cfg.entry.fib_dca.monitoring_tf_by_htf.get("4H", "4H")))
+        else:
+            needed.update(
+                tf
+                for tf in str(ltf_expected_for_htf("4H", cfg.entry)).split("|")
+                if tf and tf in TF_MS
+            )
 
     if "continuation" in replay_targets:
         if focus_htf is None:
@@ -186,11 +222,14 @@ def _load_timeframes(
             cont_htfs = tuple(htf for htf in cfg.prepare_htfs() if htf == focus_htf)
         for htf in cont_htfs:
             needed.add(htf)
-            needed.update(
-                tf
-                for tf in str(ltf_expected_for_htf(htf, cfg.entry)).split("|")
-                if tf and tf in TF_MS
-            )
+            if cfg.entry.mode == "fib_dca":
+                needed.add(str(cfg.entry.fib_dca.monitoring_tf_by_htf.get(htf, htf)))
+            else:
+                needed.update(
+                    tf
+                    for tf in str(ltf_expected_for_htf(htf, cfg.entry)).split("|")
+                    if tf and tf in TF_MS
+                )
 
     # Safety net: replay requires at least one LTF stream for ENTRY checks.
     if not any(tf in needed for tf in ("1M", "5M", "15M", "1H", "4H")):
@@ -206,13 +245,6 @@ def _apply_entry_cascade_update(setup: Any, update: Any) -> None:
     setup.entry_cascade_retrace_level = update.retrace_level
 
 
-def _reset_entry_cascade(setup: Any) -> None:
-    setup.entry_cascade_stage = 0
-    setup.entry_cascade_since_ms = None
-    setup.entry_cascade_touch_ms = None
-    setup.entry_cascade_retrace_level = None
-
-
 def _apply_advanced_entry_update(setup: Any, update: Any) -> None:
     setup.entry_advanced_stage = str(update.stage)
     setup.entry_sweep_level = update.sweep_level
@@ -221,16 +253,6 @@ def _apply_advanced_entry_update(setup: Any, update: Any) -> None:
     setup.entry_reclaim_ms = update.reclaim_ms
     setup.entry_confirm_level = update.confirm_level
     setup.entry_confirm_ms = update.confirm_ms
-
-
-def _reset_advanced_entry(setup: Any) -> None:
-    setup.entry_advanced_stage = "WAIT_SWEEP"
-    setup.entry_sweep_level = None
-    setup.entry_sweep_extreme = None
-    setup.entry_sweep_ms = None
-    setup.entry_reclaim_ms = None
-    setup.entry_confirm_level = None
-    setup.entry_confirm_ms = None
 
 
 def _expanded_limits_by_tf(
@@ -711,6 +733,12 @@ def _dedupe_overlay_events(events: list[dict[str, Any]]) -> None:
                 str(ev.get("setup_id") or ""),
                 int(ev.get("bar_open_ms") or 0),
             )
+        elif kind == "INVALIDATED":
+            key = (
+                kind,
+                str(ev.get("setup_id") or ""),
+                int(ev.get("bar_open_ms") or 0),
+            )
         else:
             key = (kind, id(ev))
         if key in seen:
@@ -832,12 +860,18 @@ def _keep_single_retrace_pivot_per_leg(
             if direction == "LONG":
                 best = min(
                     candidates,
-                    key=lambda x: (float(x[1].get("price") or 0.0), -int(x[1].get("bar_open_ms") or 0)),
+                    key=lambda x: (
+                        float(x[1].get("price") or 0.0),
+                        -int(x[1].get("bar_open_ms") or 0),
+                    ),
                 )
             else:
                 best = max(
                     candidates,
-                    key=lambda x: (float(x[1].get("price") or 0.0), int(x[1].get("bar_open_ms") or 0)),
+                    key=lambda x: (
+                        float(x[1].get("price") or 0.0),
+                        int(x[1].get("bar_open_ms") or 0),
+                    ),
                 )
             keep_pivot_idx.add(best[0])
 
@@ -941,6 +975,48 @@ def _resolve_trade_exit(
         r = _calc_r(direction="SHORT", entry=trade.entry, exit_price=trade.tp, risk=trade.risk)
         return True, trade.tp, r, "tp"
     return False, trade.entry, 0.0, "none"
+
+
+def _has_open_position(
+    open_trades: list[OpenTrade],
+    fib_positions: dict[str, FibOpenPosition],
+    *,
+    setup_id: str | None = None,
+) -> bool:
+    if setup_id is None:
+        return bool(open_trades or fib_positions)
+    return any(trade.setup_id != setup_id for trade in open_trades) or any(
+        current_setup_id != setup_id for current_setup_id in fib_positions
+    )
+
+
+def _append_invalidated_event(
+    events_out: list[dict[str, Any]] | None,
+    *,
+    setup_id: str,
+    symbol: str,
+    setup_type: str,
+    direction: str,
+    timeframe: str,
+    bar_open_ms: int,
+    invalidation_price: float,
+) -> None:
+    if events_out is None:
+        return
+    events_out.append(
+        {
+            "kind": "INVALIDATED",
+            "setup_id": setup_id,
+            "symbol": symbol,
+            "setup_type": setup_type,
+            "direction": direction,
+            "htf": timeframe,
+            "bar_open_ms": bar_open_ms,
+            "origin_price": invalidation_price,
+            "invalidation_price": invalidation_price,
+            "mark_price": invalidation_price,
+        }
+    )
 
 
 def _max_drawdown_r(closed_trades: list[ClosedTrade]) -> float:
@@ -1125,6 +1201,7 @@ async def run_history_replay(
 
     setups: list[ReplaySetup] = []
     open_trades: list[OpenTrade] = []
+    fib_positions: dict[str, FibOpenPosition] = {}
     closed_trades: list[ClosedTrade] = []
     funnel: Counter[str] = Counter()
     continuation_prepare_state = ContinuationPrepareState()
@@ -1216,6 +1293,11 @@ async def run_history_replay(
                 if setup_obj is None or event is None:
                     funnel["reversal_no_prepare_candidate"] += 1
                 else:
+                    initialize_fib_dca_setup(
+                        setup=setup_obj,
+                        prepare_payload=event.payload,
+                        config=cfg.entry.fib_dca,
+                    )
                     dedup_key = (symbol, setup_obj.type, "4H", setup_obj.direction)
                     replaced = _invalidate_armed_replay_setups_by_key(
                         setups,
@@ -1281,6 +1363,11 @@ async def run_history_replay(
                                 ),
                                 entry_mode=setup_obj.entry_mode,
                                 entry_target_price=setup_obj.entry_target_price,
+                                fib_dca_plan_json=setup_obj.fib_dca_plan_json,
+                                fib_dca_filled_json=setup_obj.fib_dca_filled_json,
+                                fib_dca_average_entry=setup_obj.fib_dca_average_entry,
+                                fib_dca_filled_weight_pct=setup_obj.fib_dca_filled_weight_pct,
+                                fib_dca_last_fill_ms=setup_obj.fib_dca_last_fill_ms,
                             )
                         )
                         funnel["reversal_prepare_created"] += 1
@@ -1320,6 +1407,8 @@ async def run_history_replay(
                                     "structure_break_key": event.payload.get(
                                         "structure_break_key"
                                     ),
+                                    "entry_mode": setup_obj.entry_mode,
+                                    "fib_dca_levels": event.payload.get("fib_dca_levels"),
                                 }
                             )
 
@@ -1348,6 +1437,11 @@ async def run_history_replay(
                 if setup_obj is None or event is None:
                     funnel[f"continuation_{htf.lower()}_no_prepare_candidate"] += 1
                     continue
+                initialize_fib_dca_setup(
+                    setup=setup_obj,
+                    prepare_payload=event.payload,
+                    config=cfg.entry.fib_dca,
+                )
 
                 dedup_key = (symbol, setup_obj.type, htf, setup_obj.direction)
                 replaced = _invalidate_armed_replay_setups_by_key(
@@ -1355,7 +1449,8 @@ async def run_history_replay(
                     key=dedup_key,
                 )
                 if replaced > 0:
-                    funnel[f"continuation_{htf.lower()}_prepare_replaced_by_new_structure"] += replaced
+                    key = f"continuation_{htf.lower()}_prepare_replaced_by_new_structure"
+                    funnel[key] += replaced
 
                 gate = evaluate_continuation_prepare_detailed(
                     df_htf=df_htf,
@@ -1416,6 +1511,11 @@ async def run_history_replay(
                         ),
                         entry_mode=setup_obj.entry_mode,
                         entry_target_price=setup_obj.entry_target_price,
+                        fib_dca_plan_json=setup_obj.fib_dca_plan_json,
+                        fib_dca_filled_json=setup_obj.fib_dca_filled_json,
+                        fib_dca_average_entry=setup_obj.fib_dca_average_entry,
+                        fib_dca_filled_weight_pct=setup_obj.fib_dca_filled_weight_pct,
+                        fib_dca_last_fill_ms=setup_obj.fib_dca_last_fill_ms,
                     )
                 )
                 funnel[f"continuation_{htf.lower()}_prepare_created"] += 1
@@ -1455,6 +1555,8 @@ async def run_history_replay(
                             "structure_break_key": event.payload.get(
                                 "structure_break_key"
                             ),
+                            "entry_mode": setup_obj.entry_mode,
+                            "fib_dca_levels": event.payload.get("fib_dca_levels"),
                         }
                     )
 
@@ -1493,10 +1595,19 @@ async def run_history_replay(
                 if raw_action == "RESET_SAME_DIRECTION" and decision.action == "KEEP":
                     funnel["setup_reset_same_direction_skipped_before_first_entry"] += 1
                 if decision.action == "INVALIDATE_OPPOSITE":
-                    setup.state = "INVALIDATED"
-                    funnel["setup_invalidated_by_opposite_structure"] += 1
-                    funnel[f"setup_invalidated_by_opposite_structure_{setup.htf.lower()}"] += 1
-                    continue
+                    keep_fib_dca = (
+                        str(setup.entry_mode).lower() == "fib_dca"
+                        and not cfg.entry.fib_dca.cancel_remaining_on_opposite_structure
+                    )
+                    if keep_fib_dca:
+                        funnel["fib_dca_kept_after_opposite_structure"] += 1
+                    else:
+                        setup.state = "INVALIDATED"
+                        funnel["setup_invalidated_by_opposite_structure"] += 1
+                        funnel[
+                            f"setup_invalidated_by_opposite_structure_{setup.htf.lower()}"
+                        ] += 1
+                        continue
                 if decision.action == "RESET_SAME_DIRECTION":
                     setup.state = "INVALIDATED"
                     funnel["setup_reset_by_new_structure_same_direction"] += 1
@@ -1532,7 +1643,126 @@ async def run_history_replay(
                     )
                 continue
 
+            if str(setup.entry_mode).lower() == "fib_dca":
+                if _has_open_position(open_trades, fib_positions, setup_id=setup.id):
+                    funnel["entry_skipped_open_position"] += 1
+                    continue
+                plan = deserialize_plan(setup.fib_dca_plan_json)
+                monitor_tf = str(
+                    cfg.entry.fib_dca.monitoring_tf_by_htf.get(setup.htf, setup.htf)
+                )
+                monitor_df = series.get(monitor_tf)
+                if (
+                    not plan
+                    or monitor_tf not in closed_now
+                    or monitor_df is None
+                    or monitor_df.empty
+                ):
+                    continue
+                row = monitor_df.iloc[-1]
+                bar_open_ms = int(row["open_time"])
+                monitor_invalidated = (
+                    float(row["low"]) <= float(setup.invalidation_price)
+                    if setup.direction == "LONG"
+                    else float(row["high"]) >= float(setup.invalidation_price)
+                )
+                if monitor_invalidated:
+                    setup.state = "INVALIDATED"
+                    funnel["fib_dca_invalidated_on_monitor_tf"] += 1
+                    _append_invalidated_event(
+                        events_out,
+                        setup_id=setup.id,
+                        symbol=symbol,
+                        setup_type=setup.setup_type,
+                        direction=setup.direction,
+                        timeframe=monitor_tf,
+                        bar_open_ms=bar_open_ms,
+                        invalidation_price=float(setup.invalidation_price),
+                    )
+                    continue
+                filled = deserialize_filled_fibs(setup.fib_dca_filled_json)
+                fills = new_fib_dca_fills(
+                    direction=setup.direction,
+                    plan=plan,
+                    filled_fibs=filled,
+                    price_low=float(row["low"]),
+                    price_high=float(row["high"]),
+                )
+                initial_fills = initial_trigger_fills(
+                    plan=plan,
+                    filled_fibs=filled,
+                    trigger_price=float(setup.ote_low),
+                )
+                fills = list(
+                    {level.fib: level for level in [*initial_fills, *fills]}.values()
+                )
+                for level in fills:
+                    filled.add(level.fib)
+                    setup.fib_dca_filled_json = serialize_filled_fibs(filled)
+                    setup.fib_dca_average_entry = weighted_average_entry(plan, filled)
+                    setup.fib_dca_filled_weight_pct = filled_weight_pct(plan, filled)
+                    setup.fib_dca_last_fill_ms = bar_open_ms
+                    setup.entry_count = len(filled)
+                    position = fib_positions.get(setup.id)
+                    if position is None:
+                        position = FibOpenPosition(
+                            setup_id=setup.id,
+                            symbol=symbol,
+                            setup_type=setup.setup_type,
+                            direction=setup.direction,
+                            tf=monitor_tf,
+                            entry_time=bar_open_ms,
+                            plan=plan,
+                            filled_fibs=set(),
+                            sl=float(setup.invalidation_price),
+                            tp=float(setup.entry_target_price),
+                        )
+                        fib_positions[setup.id] = position
+                    position.filled_fibs.add(level.fib)
+                    funnel["fib_dca_entry_opened"] += 1
+                    funnel[f"fib_dca_entry_{level.fib:g}"] += 1
+                    if events_out is not None:
+                        events_out.append(
+                            {
+                                "kind": "ENTRY",
+                                "setup_id": setup.id,
+                                "symbol": symbol,
+                                "setup_type": setup.setup_type,
+                                "direction": setup.direction,
+                                "htf": monitor_tf,
+                                "entry_ltf": monitor_tf,
+                                "setup_htf": setup.htf,
+                                "bar_open_ms": bar_open_ms,
+                                "entry": level.price,
+                                "entry_mode": "fib_dca",
+                                "fib": level.fib,
+                                "weight_pct": level.weight_pct,
+                                "filled_weight_pct": setup.fib_dca_filled_weight_pct,
+                                "average_entry": setup.fib_dca_average_entry,
+                                "recommended_stop": setup.invalidation_price,
+                                "target_price": setup.entry_target_price,
+                                "invalidation_price": setup.invalidation_price,
+                            }
+                        )
+                if (
+                    not filled
+                    and cfg.entry.fib_dca.cancel_remaining_on_target
+                    and bar_open_ms > int(prepare_since_open_ms(setup))
+                ):
+                    target_reached = (
+                        float(row["high"]) >= float(setup.entry_target_price)
+                        if setup.direction == "LONG"
+                        else float(row["low"]) <= float(setup.entry_target_price)
+                    )
+                    if target_reached:
+                        setup.state = "CONFIRMED"
+                        funnel["fib_dca_target_reached_without_fill"] += 1
+                continue
+
             lib = cfg.paper_mode.liberal
+            if _has_open_position(open_trades, fib_positions):
+                funnel["entry_skipped_open_position"] += 1
+                continue
             ltf_result = resolve_ltf_confirmation(
                 setup=setup,
                 series=series,
@@ -1670,6 +1900,13 @@ async def run_history_replay(
             if levels is not None:
                 sl = float(levels["sl"])
                 tp = float(levels["tp"])
+            trade_sl = sl if sl is not None else recommended_stop
+            trade_tp = (
+                tp
+                if tp is not None
+                else float(ltf_result.target_price or setup.entry_target_price)
+            )
+            if abs(entry - trade_sl) > 0:
                 open_trades.append(
                     OpenTrade(
                         setup_id=setup.id,
@@ -1679,9 +1916,9 @@ async def run_history_replay(
                         tf=used_tf,
                         entry_time=bar_open_ms,
                         entry=entry,
-                        sl=sl,
-                        tp=tp,
-                        risk=abs(entry - sl),
+                        sl=trade_sl,
+                        tp=trade_tp,
+                        risk=abs(entry - trade_sl),
                     )
                 )
                 funnel["entry_opened"] += 1
@@ -1694,16 +1931,10 @@ async def run_history_replay(
             setup.last_entry_swing_level = (
                 float(choch.reset_level) if choch.reset_level is not None else None
             )
-            setup.state = "CONFIRMED" if setup.entry_count >= max_entries_per_setup else "ARMED"
-            if setup.state == "ARMED" and cascade_sequence_for_htf(setup.htf, cfg.entry):
-                _reset_entry_cascade(setup)
-            if setup.state == "ARMED" and str(getattr(setup, "entry_mode", "simple")) in {
-                "advanced",
-                "sweep_reclaim",
-            }:
-                _reset_advanced_entry(setup)
-            if setup.state == "ARMED":
-                funnel["entry_sent_keep_setup_armed"] += 1
+            # Keep the setup active only as the owner of the open position.
+            # The global position lock prevents any re-entry until TP/SL.
+            setup.state = "ARMED"
+            funnel["entry_sent_keep_setup_armed"] += 1
 
             if events_out is not None:
                 ev: dict[str, Any] = {
@@ -1738,6 +1969,8 @@ async def run_history_replay(
                 }
                 if ltf_result.target_price is not None:
                     ev["target_price"] = float(ltf_result.target_price)
+                elif setup.entry_target_price is not None:
+                    ev["target_price"] = float(setup.entry_target_price)
                 if ltf_result.rr_to_target is not None:
                     ev["rr_to_target"] = float(ltf_result.rr_to_target)
                 if sl is not None and tp is not None:
@@ -1779,9 +2012,90 @@ async def run_history_replay(
                     exit_reason=reason,
                 )
             )
+            for setup in setups:
+                if setup.id == trade.setup_id and setup.state == "ARMED":
+                    setup.state = "INVALIDATED" if r_mult < 0 else "CONFIRMED"
+                    break
+            if r_mult < 0:
+                _append_invalidated_event(
+                    events_out,
+                    setup_id=trade.setup_id,
+                    symbol=trade.symbol,
+                    setup_type=trade.setup_type,
+                    direction=trade.direction,
+                    timeframe=trade.tf,
+                    bar_open_ms=int(row["open_time"]),
+                    invalidation_price=trade.sl,
+                )
             funnel[f"trade_closed_{reason}"] += 1
 
         open_trades = still_open
+
+        for setup_id, position in list(fib_positions.items()):
+            if position.tf not in closed_now:
+                continue
+            tf_df = series.get(position.tf)
+            if tf_df is None or tf_df.empty:
+                continue
+            row = tf_df.iloc[-1]
+            high = float(row["high"])
+            low = float(row["low"])
+            if position.direction == "LONG":
+                hit_sl = low <= position.sl
+                hit_tp = high >= position.tp
+            else:
+                hit_sl = high >= position.sl
+                hit_tp = low <= position.tp
+            if not hit_sl and not hit_tp:
+                continue
+            exit_price = position.sl if hit_sl else position.tp
+            risk = planned_risk(position.plan, invalidation_price=position.sl)
+            pnl = position_pnl(
+                position.plan,
+                filled_fibs=position.filled_fibs,
+                direction=position.direction,
+                exit_price=exit_price,
+            )
+            avg_entry = weighted_average_entry(position.plan, position.filled_fibs)
+            closed_trades.append(
+                ClosedTrade(
+                    setup_id=position.setup_id,
+                    symbol=position.symbol,
+                    setup_type=position.setup_type,
+                    direction=position.direction,
+                    tf=position.tf,
+                    entry_time=position.entry_time,
+                    exit_time=int(row["open_time"]),
+                    entry=float(avg_entry or 0.0),
+                    exit=exit_price,
+                    r_multiple=(pnl / risk) if risk > 0 else 0.0,
+                    exit_reason=(
+                        "both_hit_same_bar_sl_first"
+                        if hit_sl and hit_tp
+                        else ("sl" if hit_sl else "tp")
+                    ),
+                )
+            )
+            del fib_positions[setup_id]
+            for setup in setups:
+                if setup.id == setup_id and setup.state == "ARMED":
+                    if hit_sl:
+                        setup.state = "INVALIDATED"
+                    elif cfg.entry.fib_dca.cancel_remaining_on_target:
+                        setup.state = "CONFIRMED"
+                    break
+            if hit_sl:
+                _append_invalidated_event(
+                    events_out,
+                    setup_id=position.setup_id,
+                    symbol=position.symbol,
+                    setup_type=position.setup_type,
+                    direction=position.direction,
+                    timeframe=position.tf,
+                    bar_open_ms=int(row["open_time"]),
+                    invalidation_price=position.sl,
+                )
+            funnel["fib_dca_trade_closed_sl" if hit_sl else "fib_dca_trade_closed_tp"] += 1
 
         if progress and (pos == len(timeline) or pos % 500 == 0):
             _print_replay_progress(
@@ -1810,6 +2124,35 @@ async def run_history_replay(
             )
         )
         funnel["trade_closed_eod"] += 1
+
+    for position in fib_positions.values():
+        tf_df = dfs[position.tf]
+        row = tf_df.iloc[-1]
+        exit_price = float(row["close"])
+        risk = planned_risk(position.plan, invalidation_price=position.sl)
+        pnl = position_pnl(
+            position.plan,
+            filled_fibs=position.filled_fibs,
+            direction=position.direction,
+            exit_price=exit_price,
+        )
+        avg_entry = weighted_average_entry(position.plan, position.filled_fibs)
+        closed_trades.append(
+            ClosedTrade(
+                setup_id=position.setup_id,
+                symbol=position.symbol,
+                setup_type=position.setup_type,
+                direction=position.direction,
+                tf=position.tf,
+                entry_time=position.entry_time,
+                exit_time=int(row["open_time"]),
+                entry=float(avg_entry or 0.0),
+                exit=exit_price,
+                r_multiple=(pnl / risk) if risk > 0 else 0.0,
+                exit_reason="eod_close",
+            )
+        )
+        funnel["fib_dca_trade_closed_eod"] += 1
 
     if events_out is not None:
         if progress:

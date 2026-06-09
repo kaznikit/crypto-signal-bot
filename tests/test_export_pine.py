@@ -26,3 +26,28 @@ def test_collect_arrays_entry_uses_recommended_stop_and_htf_target() -> None:
     assert arrays["kinds"] == ["ENTRY"]
     assert arrays["sls"] == [99.0]
     assert arrays["tps"] == [105.0]
+
+
+def test_collect_arrays_invalidated_uses_actual_stop_mark_price() -> None:
+    arrays = _collect_arrays(
+        [
+            {
+                "kind": "INVALIDATED",
+                "symbol": "BTCUSDT",
+                "htf": "5M",
+                "setup_htf": "1H",
+                "bar_open_ms": 1_000,
+                "invalidation_price": 90.0,
+                "mark_price": 95.0,
+                "direction": "LONG",
+            }
+        ],
+        tf="1H",
+        since_ms=None,
+        include_liberal=False,
+        kinds={"INVALIDATED"},
+        symbol="BTCUSDT",
+    )
+
+    assert arrays["kinds"] == ["INVALIDATED"]
+    assert arrays["prices"] == [95.0]

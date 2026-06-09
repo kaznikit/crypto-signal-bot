@@ -4,6 +4,7 @@ indicator("Signal Bot Overlay", overlay=true, max_labels_count=500, max_lines_co
 // Длина горизонтального продолжения fib-уровней импульса вперёд от пика, в барах
 // текущего TF графика (отдельно от tf_ms сетапа на сетке).
 fib_extend_bars = input.int(40, "IMPULSE fib forward bars", minval=5, maxval=200)
+show_impulses = input.bool(false, "Show IMPULSE")
 
 var int[]    sig_t       = array.new_int(0)
 var int[]    sig_t2      = array.new_int(0)
@@ -73,7 +74,7 @@ if barstate.islast
             line_start = t2_ms > 0 ? t2_ms : t_ms
             line.new(line_start, p, t_ms, p, xloc=xloc.bar_time, color=col, width=2, style=sk == "BOS" ? line.style_solid : line.style_dashed)
             label.new(t_ms, p, text=sk + " " + d, xloc=xloc.bar_time, style=d == "LONG" ? label.style_label_up : label.style_label_down, color=color.new(col, 30), textcolor=color.white, size=size.small)
-        else if k == "IMPULSE"
+        else if k == "IMPULSE" and show_impulses
             // IMPULSE-нога Pine-стека: HL→HH (LONG) или LH→LL (SHORT).
             // (t_ms, p) = start_price (HL/LH), (t2_ms, lo) = end_price (HH/LL).
             // Цвет ноги мягче, чем у структуры, чтобы не сливалось с горизонталью BOS/CHoCH.

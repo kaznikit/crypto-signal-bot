@@ -97,6 +97,20 @@ class Repository:
             for column in ("entry_sweep_ms", "entry_reclaim_ms", "entry_confirm_ms"):
                 if column not in cols:
                     conn.execute(text(f"ALTER TABLE setups ADD COLUMN {column} INTEGER"))
+            for column in ("fib_dca_plan_json", "fib_dca_filled_json"):
+                if column not in cols:
+                    conn.execute(text(f"ALTER TABLE setups ADD COLUMN {column} TEXT"))
+            for column in ("fib_dca_average_entry", "fib_dca_filled_weight_pct"):
+                if column not in cols:
+                    default = " DEFAULT 0" if column == "fib_dca_filled_weight_pct" else ""
+                    conn.execute(text(f"ALTER TABLE setups ADD COLUMN {column} FLOAT{default}"))
+            if "fib_dca_last_fill_ms" not in cols:
+                conn.execute(text("ALTER TABLE setups ADD COLUMN fib_dca_last_fill_ms INTEGER"))
+            for column in ("active_trade_stop_price", "active_trade_target_price"):
+                if column not in cols:
+                    conn.execute(text(f"ALTER TABLE setups ADD COLUMN {column} FLOAT"))
+            if "active_trade_tf" not in cols:
+                conn.execute(text("ALTER TABLE setups ADD COLUMN active_trade_tf VARCHAR(8)"))
 
     def upsert_setup(self, setup: Setup) -> None:
         with self._session_factory() as session:

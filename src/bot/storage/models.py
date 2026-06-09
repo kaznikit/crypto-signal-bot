@@ -76,6 +76,16 @@ class Setup(Base):
     entry_confirm_level: Mapped[float | None] = mapped_column(Float, nullable=True)
     entry_confirm_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     entry_target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Frozen Fib DCA plan and fill progress for restart-safe limit ladders.
+    fib_dca_plan_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fib_dca_filled_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fib_dca_average_entry: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fib_dca_filled_weight_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    fib_dca_last_fill_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Non-DCA position lifecycle: block any further ENTRY until TP or stop.
+    active_trade_stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    active_trade_target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    active_trade_tf: Mapped[str | None] = mapped_column(String(8), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

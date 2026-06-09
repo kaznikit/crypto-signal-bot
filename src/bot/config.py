@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -110,16 +110,57 @@ class EntryAdvancedConfig(BaseModel):
     min_rr_to_htf_target: float = 3.0
 
 
+class FibDcaLevelConfig(BaseModel):
+    fib: float
+    weight_pct: float
+
+
+class FibDcaConfig(BaseModel):
+    """Limit-entry ladder anchored to the PREPARE impulse."""
+
+    monitoring_tf_by_htf: dict[str, str] = Field(
+        default_factory=lambda: {"4H": "5M", "1H": "5M", "15M": "5M"}
+    )
+    levels: list[FibDcaLevelConfig] = Field(
+        default_factory=lambda: [
+            FibDcaLevelConfig(fib=0.5, weight_pct=40.0),
+            FibDcaLevelConfig(fib=0.618, weight_pct=30.0),
+            FibDcaLevelConfig(fib=0.705, weight_pct=20.0),
+            FibDcaLevelConfig(fib=0.786, weight_pct=10.0),
+        ]
+    )
+    stop_source: Literal["htf_invalidation"] = "htf_invalidation"
+    target_source: Literal["impulse_end"] = "impulse_end"
+    cancel_remaining_on_target: bool = True
+    cancel_remaining_on_opposite_structure: bool = True
+
+    @model_validator(mode="after")
+    def validate_levels(self) -> FibDcaConfig:
+        if not self.levels:
+            raise ValueError("entry.fib_dca.levels must not be empty")
+        fibs = [float(level.fib) for level in self.levels]
+        if any(fib <= 0 or fib >= 1 for fib in fibs):
+            raise ValueError("entry.fib_dca.levels fib values must be between 0 and 1")
+        if fibs != sorted(fibs) or len(set(fibs)) != len(fibs):
+            raise ValueError("entry.fib_dca.levels must be unique and sorted by fib")
+        if any(float(level.weight_pct) <= 0 for level in self.levels):
+            raise ValueError("entry.fib_dca.levels weight_pct must be positive")
+        total = sum(float(level.weight_pct) for level in self.levels)
+        if abs(total - 100.0) > 1e-6:
+            raise ValueError("entry.fib_dca.levels weight_pct must sum to 100")
+        return self
+
+
 class EntryConfig(BaseModel):
     """LTF-подтверждение ENTRY после PREPARE на HTF."""
 
     # simple — текущий ENTRY по LTF BOS/CHoCH; advanced — sweep/reclaim/CHoCH/retest.
-    mode: Literal["simple", "advanced", "sweep_reclaim"] = "simple"
-    # HTF сетапа → LTF для ENTRY (pipe, приоритет слева: «5M|15M|1H» для 4H).
+    mode: Literal["simple", "advanced", "sweep_reclaim", "fib_dca"] = "simple"
+    # HTF сетапа → LTF для ENTRY. Pipe позволяет явно задать несколько TF.
     ltf_by_htf: dict[str, str] = Field(
         default_factory=lambda: {
-            "4H": "5M|15M|1H",
-            "1H": "5M|15M",
+            "4H": "5M",
+            "1H": "5M",
             "15M": "5M",
         }
     )
@@ -147,7 +188,7 @@ class EntryConfig(BaseModel):
     # true — swing для ENTRY = pivots.swing_size_by_tf (как линии BOS на оверлее).
     ltf_swing_use_pivot_sizes: bool = False
     # Максимум ENTRY-сигналов на один setup, пока он остаётся валидным.
-    max_entries_per_setup: int = 2
+    max_entries_per_setup: int = 1
     # Каскадный ENTRY: после PREPARE на HTF подтверждение идёт по цепочке TF,
     # например 1H -> 5M BOS/CHoCH -> 1M BOS/CHoCH.
     cascade_enabled: bool = False
@@ -157,6 +198,7 @@ class EntryConfig(BaseModel):
         default_factory=lambda: ["BOS", "CHOCH"]
     )
     advanced: EntryAdvancedConfig = Field(default_factory=EntryAdvancedConfig)
+    fib_dca: FibDcaConfig = Field(default_factory=FibDcaConfig)
 
 
 class FiltersConfig(BaseModel):
@@ -210,6 +252,28 @@ class EntryStatsConfig(BaseModel):
     max_candidates_per_run: int = 25
 
 
+class PrepareStatsConfig(BaseModel):
+    enabled: bool = True
+    check_interval_hours: int = 24
+    max_candidates_per_run: int = 25
+    evaluation_tf_by_htf: dict[str, str] = Field(
+        default_factory=lambda: {"4H": "5M", "1H": "5M", "15M": "1M"}
+    )
+    # Empty means use entry.fib_dca.levels.
+    fib_levels: list[float] = Field(default_factory=list)
+    target_source: Literal["impulse_end"] = "impulse_end"
+    invalidation_source: Literal["setup_invalidation"] = "setup_invalidation"
+
+    @model_validator(mode="after")
+    def validate_fib_levels(self) -> PrepareStatsConfig:
+        fibs = [float(fib) for fib in self.fib_levels]
+        if any(fib <= 0 or fib >= 1 for fib in fibs):
+            raise ValueError("prepare_stats.fib_levels values must be between 0 and 1")
+        if fibs != sorted(fibs) or len(set(fibs)) != len(fibs):
+            raise ValueError("prepare_stats.fib_levels must be unique and sorted")
+        return self
+
+
 class StrategyFeaturesConfig(BaseModel):
     """Опциональные правила стратегии — включаются через config.yaml.
 
@@ -248,6 +312,7 @@ class BotConfig(BaseModel):
     paper_mode: PaperModeConfig
     history_replay: HistoryReplayConfig = Field(default_factory=HistoryReplayConfig)
     entry_stats: EntryStatsConfig = Field(default_factory=EntryStatsConfig)
+    prepare_stats: PrepareStatsConfig = Field(default_factory=PrepareStatsConfig)
     strategy_features: StrategyFeaturesConfig = Field(default_factory=StrategyFeaturesConfig)
 
     def prepare_htfs(self) -> tuple[str, ...]:

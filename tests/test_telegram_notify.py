@@ -25,6 +25,26 @@ def test_prepare_message_uses_vertical_format() -> None:
     ]
 
 
+def test_prepare_message_lists_fib_dca_plan() -> None:
+    notifier = TelegramNotifier(bot_token="123456:TEST_TOKEN", chat_id="1")
+    msg = notifier._format_message(
+        kind=SignalKind.PREPARE,
+        payload={
+            "symbol": "BTCUSDT",
+            "direction": "LONG",
+            "invalidation_price": 90,
+            "entry_mode": "fib_dca",
+            "fib_dca_levels": [
+                {"fib": 0.5, "weight_pct": 40, "price": 100},
+                {"fib": 0.618, "weight_pct": 30, "price": 97.64},
+            ],
+        },
+    )
+
+    assert "fib 0.5 | weight 40% | price 100" in msg
+    assert "fib 0.618 | weight 30% | price 97.64" in msg
+
+
 def test_entry_message_marks_reentry_vertically() -> None:
     notifier = TelegramNotifier(bot_token="123456:TEST_TOKEN", chat_id="1")
     msg = notifier._format_message(
@@ -89,3 +109,12 @@ def test_entry_message_marks_primary_entry_vertically() -> None:
         "mode simple",
         "isReentry false",
     ]
+
+
+def test_signal_id_stays_backward_compatible_without_discriminator() -> None:
+    legacy = TelegramNotifier.build_signal_id("setup", "ENTRY", 1_000)
+    fib_a = TelegramNotifier.build_signal_id("setup", "ENTRY", 1_000, "fib:0.5")
+    fib_b = TelegramNotifier.build_signal_id("setup", "ENTRY", 1_000, "fib:0.618")
+
+    assert legacy == TelegramNotifier.build_signal_id("setup", "ENTRY", 1_000)
+    assert len({legacy, fib_a, fib_b}) == 3

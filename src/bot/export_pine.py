@@ -155,7 +155,7 @@ def _collect_arrays(
         if tf:
             row_tf = str(ev.get("htf") or "")
             setup_tf = str(ev.get("setup_htf") or "")
-            if kind == "ENTRY":
+            if kind in {"ENTRY", "INVALIDATED"}:
                 if row_tf != tf and setup_tf != tf:
                     continue
             elif row_tf != tf:
@@ -350,7 +350,7 @@ def main() -> None:
     parser.add_argument("--since", default=None, help="UTC date YYYY-MM-DD")
     parser.add_argument(
         "--kinds",
-        default="PREPARE,ENTRY,INVALIDATED,STRUCTURE,IMPULSE,PIVOT",
+        default="PREPARE,ENTRY,INVALIDATED,STRUCTURE,PIVOT",
         help="Comma-separated signal kinds (PREPARE,ENTRY,INVALIDATED,STRUCTURE,IMPULSE,PIVOT)",
     )
     parser.add_argument(

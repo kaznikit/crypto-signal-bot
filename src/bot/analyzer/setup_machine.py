@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 from hashlib import sha256
+from typing import Any
 
 from bot.market.fibo import OteZone, is_price_in_zone
 from bot.storage.models import Setup, SetupState, SetupType
@@ -12,7 +13,7 @@ from bot.util.time import ensure_utc, utcnow
 @dataclass(slots=True)
 class SetupEvent:
     kind: str
-    payload: dict[str, str | float | bool]
+    payload: dict[str, Any]
 
 
 def make_setup_id(symbol: str, setup_type: SetupType, htf: str, close_time: int) -> str:
@@ -81,6 +82,14 @@ def build_setup(
         entry_confirm_level=None,
         entry_confirm_ms=None,
         entry_target_price=entry_target_price,
+        fib_dca_plan_json=None,
+        fib_dca_filled_json=None,
+        fib_dca_average_entry=None,
+        fib_dca_filled_weight_pct=0.0,
+        fib_dca_last_fill_ms=None,
+        active_trade_stop_price=None,
+        active_trade_target_price=None,
+        active_trade_tf=None,
         created_at=now,
         updated_at=now,
         expires_at=now + timedelta(hours=ttl_hours),

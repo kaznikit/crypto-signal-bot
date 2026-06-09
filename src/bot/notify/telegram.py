@@ -34,8 +34,15 @@ class TelegramNotifier:
         return self._paper_chat_id if paper_mode and self._paper_chat_id else self._chat_id
 
     @staticmethod
-    def build_signal_id(setup_id: str, kind: str, close_time: int) -> str:
+    def build_signal_id(
+        setup_id: str,
+        kind: str,
+        close_time: int,
+        discriminator: str | None = None,
+    ) -> str:
         raw = f"{setup_id}:{kind}:{close_time}"
+        if discriminator is not None:
+            raw = f"{raw}:{discriminator}"
         return sha256(raw.encode("ascii")).hexdigest()
 
     async def send_event(
@@ -47,7 +54,13 @@ class TelegramNotifier:
         liberal_paper_only: bool = False,
     ) -> Signal | None:
         setup_id = str(payload.get("setup_id", "system"))
-        signal_id = self.build_signal_id(setup_id, kind.value, close_time)
+        discriminator = payload.get("signal_discriminator")
+        signal_id = self.build_signal_id(
+            setup_id,
+            kind.value,
+            close_time,
+            str(discriminator) if discriminator is not None else None,
+        )
         liberal = bool(payload.get("liberal")) or liberal_paper_only
         message = self._format_message(kind=kind, payload=payload, liberal=liberal)
 
@@ -95,14 +108,25 @@ class TelegramNotifier:
         tv_line = f"\nTV: {tv}" if tv else ""
         if kind == SignalKind.PREPARE:
             is_reentry = bool(payload.get("is_reentry", False))
-            return (
-                f"{prefix}PREPARE\n"
-                f"{symbol}\n"
-                f"{direction}\n"
-                f"invalidate {payload.get('invalidation_price')}\n"
-                f"isReentry {str(is_reentry).lower()}\n"
-                f"Score {payload.get('score', 0)}{tv_line}"
+            lines = [
+                f"{prefix}PREPARE",
+                str(symbol),
+                str(direction),
+                f"invalidate {payload.get('invalidation_price')}",
+            ]
+            if payload.get("entry_mode") == "fib_dca":
+                for level in payload.get("fib_dca_levels") or []:
+                    lines.append(
+                        f"fib {level.get('fib')} | weight {level.get('weight_pct')}% "
+                        f"| price {level.get('price')}"
+                    )
+            lines.extend(
+                [
+                    f"isReentry {str(is_reentry).lower()}",
+                    f"Score {payload.get('score', 0)}{tv_line}",
+                ]
             )
+            return "\n".join(lines)
         if kind == SignalKind.ENTRY:
             entry_idx = payload.get("entry_index")
             idx_num: int | None = None
@@ -121,6 +145,14 @@ class TelegramNotifier:
             if payload.get("recommended_stop") is not None:
                 lines.append(f"recommendedStop {payload.get('recommended_stop')}")
             lines.append(f"invalidate {payload.get('invalidation_price')}")
+            if payload.get("fib") is not None:
+                lines.append(f"fib {payload.get('fib')}")
+            if payload.get("weight_pct") is not None:
+                lines.append(f"weight {payload.get('weight_pct')}%")
+            if payload.get("filled_weight_pct") is not None:
+                lines.append(f"filled {payload.get('filled_weight_pct')}%")
+            if payload.get("average_entry") is not None:
+                lines.append(f"averageEntry {payload.get('average_entry')}")
             target = payload.get("target_price", payload.get("tp"))
             if target is not None:
                 lines.append(f"target {target}")
