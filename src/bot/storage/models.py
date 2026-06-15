@@ -57,6 +57,35 @@ class Setup(Base):
     last_entry_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Reset-swing уровень (LTF) для re-entry: LONG -> прошлый LOW, SHORT -> прошлый HIGH.
     last_entry_swing_level: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Прогресс каскадного ENTRY: stage указывает текущий TF в цепочке.
+    entry_cascade_stage: Mapped[int] = mapped_column(Integer, default=0)
+    # open_time предыдущего BOS в каскаде, после которого ждём retrace 0.5.
+    entry_cascade_since_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # open_time бара касания 0.5 перед текущим TF-подтверждением.
+    entry_cascade_touch_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Уровень 0.5 предыдущего TF-импульса.
+    entry_cascade_retrace_level: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Режим ENTRY фиксируется при создании setup, чтобы смена конфига не меняла активный setup.
+    entry_mode: Mapped[str] = mapped_column(String(16), default="simple")
+    # Состояние advanced ENTRY FSM.
+    entry_advanced_stage: Mapped[str] = mapped_column(String(32), default="WAIT_SWEEP")
+    entry_sweep_level: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_sweep_extreme: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_sweep_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entry_reclaim_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entry_confirm_level: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_confirm_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    entry_target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Frozen Fib DCA plan and fill progress for restart-safe limit ladders.
+    fib_dca_plan_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fib_dca_filled_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fib_dca_average_entry: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fib_dca_filled_weight_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    fib_dca_last_fill_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Non-DCA position lifecycle: block any further ENTRY until TP or stop.
+    active_trade_stop_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    active_trade_target_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    active_trade_tf: Mapped[str | None] = mapped_column(String(8), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

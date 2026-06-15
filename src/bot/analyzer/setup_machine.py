@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 from hashlib import sha256
+from typing import Any
 
 from bot.market.fibo import OteZone, is_price_in_zone
 from bot.storage.models import Setup, SetupState, SetupType
@@ -12,7 +13,7 @@ from bot.util.time import ensure_utc, utcnow
 @dataclass(slots=True)
 class SetupEvent:
     kind: str
-    payload: dict[str, str | float | bool]
+    payload: dict[str, Any]
 
 
 def make_setup_id(symbol: str, setup_type: SetupType, htf: str, close_time: int) -> str:
@@ -40,6 +41,12 @@ def build_setup(
     last_entry_bar_ms: int | None = None,
     last_entry_price: float | None = None,
     last_entry_swing_level: float | None = None,
+    entry_cascade_stage: int = 0,
+    entry_cascade_since_ms: int | None = None,
+    entry_cascade_touch_ms: int | None = None,
+    entry_cascade_retrace_level: float | None = None,
+    entry_mode: str = "simple",
+    entry_target_price: float | None = None,
 ) -> Setup:
     now = utcnow()
     return Setup(
@@ -62,6 +69,27 @@ def build_setup(
         last_entry_bar_ms=last_entry_bar_ms,
         last_entry_price=last_entry_price,
         last_entry_swing_level=last_entry_swing_level,
+        entry_cascade_stage=entry_cascade_stage,
+        entry_cascade_since_ms=entry_cascade_since_ms,
+        entry_cascade_touch_ms=entry_cascade_touch_ms,
+        entry_cascade_retrace_level=entry_cascade_retrace_level,
+        entry_mode=entry_mode,
+        entry_advanced_stage="WAIT_SWEEP",
+        entry_sweep_level=None,
+        entry_sweep_extreme=None,
+        entry_sweep_ms=None,
+        entry_reclaim_ms=None,
+        entry_confirm_level=None,
+        entry_confirm_ms=None,
+        entry_target_price=entry_target_price,
+        fib_dca_plan_json=None,
+        fib_dca_filled_json=None,
+        fib_dca_average_entry=None,
+        fib_dca_filled_weight_pct=0.0,
+        fib_dca_last_fill_ms=None,
+        active_trade_stop_price=None,
+        active_trade_target_price=None,
+        active_trade_tf=None,
         created_at=now,
         updated_at=now,
         expires_at=now + timedelta(hours=ttl_hours),

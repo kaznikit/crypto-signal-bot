@@ -5,17 +5,20 @@ from typing import Any
 import pandas as pd
 
 from bot.config import EntryConfig
-from bot.market.pivots import LtfChoCh, detect_ltf_entry_confirm
+from bot.market.pivots import (
+    LtfChoCh,
+    detect_ltf_entry_confirm,
+)
 
 # Дефолты, если в конфиге нет ключа для HTF.
 DEFAULT_LTF_BY_HTF: dict[str, str] = {
-    "4H": "5M|15M|1H",
-    "1H": "5M|15M",
+    "4H": "5M",
+    "1H": "5M",
     "15M": "5M",
 }
 
-FINE_TO_COARSE = ("5M", "15M", "1H", "4H")
-COARSE_TO_FINE = ("4H", "1H", "15M", "5M")
+FINE_TO_COARSE = ("1M", "5M", "15M", "1H", "4H")
+COARSE_TO_FINE = ("4H", "1H", "15M", "5M", "1M")
 
 
 def parse_ltf_pipe(value: str) -> list[str]:
@@ -24,9 +27,21 @@ def parse_ltf_pipe(value: str) -> list[str]:
 
 def ltf_expected_for_htf(htf: str, entry: EntryConfig) -> str:
     """Pipe-список LTF для ENTRY (порядок = приоритет: сначала младший TF)."""
+    if str(entry.mode).lower() not in {"advanced", "sweep_reclaim"}:
+        cascade = cascade_sequence_for_htf(htf, entry)
+        if cascade:
+            return "|".join(cascade)
     if entry.ltf_by_htf and htf in entry.ltf_by_htf:
         return str(entry.ltf_by_htf[htf])
     return DEFAULT_LTF_BY_HTF.get(htf, "5M")
+
+
+def cascade_sequence_for_htf(htf: str, entry: EntryConfig) -> list[str]:
+    if not bool(entry.cascade_enabled):
+        return []
+    if not entry.cascade_by_htf or htf not in entry.cascade_by_htf:
+        return []
+    return parse_ltf_pipe(str(entry.cascade_by_htf[htf]))
 
 
 def finest_closed_ltf(
@@ -81,6 +96,41 @@ def ltf_directional_close_ok(*, close: float, open_: float, direction: str) -> b
     return close < open_
 
 
+def detect_entry_structure_confirm(
+    *,
+    entry: EntryConfig,
+    ltf_df: pd.DataFrame,
+    used_tf: str,
+    direction: str,
+    since_open_ms: int | None,
+    pivot_swing_by_tf: dict[str, int] | None,
+    liberal_swing_override: dict[str, int] | None,
+    is_liberal: bool,
+    use_close: bool,
+    structure_kinds: tuple[str, ...],
+    lookback_mode: str,
+) -> LtfChoCh | None:
+    swing = resolve_entry_swing_size(
+        entry,
+        used_tf,
+        is_liberal=is_liberal,
+        liberal_override=liberal_swing_override,
+        pivot_swing_by_tf=pivot_swing_by_tf,
+    )
+    max_bars = int(entry.ltf_max_bars_ago_by_tf.get(used_tf, entry.ltf_max_bars_ago))
+    kinds = tuple(k.upper() for k in structure_kinds) or ("CHOCH",)
+    return detect_ltf_entry_confirm(
+        ltf_df,
+        swing_size=swing,
+        max_bars_ago=max_bars,
+        use_close=use_close,
+        kinds=kinds,
+        direction=direction,
+        since_open_ms=since_open_ms,
+        lookback_mode=lookback_mode,
+    )
+
+
 def try_entry_confirm(
     *,
     entry: EntryConfig,
@@ -111,23 +161,18 @@ def try_entry_confirm(
             kind="CLOSE",
         )
 
-    swing = resolve_entry_swing_size(
-        entry,
-        used_tf,
-        is_liberal=is_liberal,
-        liberal_override=liberal_swing_override,
-        pivot_swing_by_tf=pivot_swing_by_tf,
-    )
-    max_bars = int(entry.ltf_max_bars_ago_by_tf.get(used_tf, entry.ltf_max_bars_ago))
     kinds = tuple(k.upper() for k in entry.confirm_structure_kinds) or ("CHOCH",)
-    choch = detect_ltf_entry_confirm(
-        ltf_df,
-        swing_size=swing,
-        max_bars_ago=max_bars,
-        use_close=use_close,
-        kinds=kinds,
+    choch = detect_entry_structure_confirm(
+        entry=entry,
+        ltf_df=ltf_df,
+        used_tf=used_tf,
         direction=str(setup.direction),
         since_open_ms=since_ms,
+        pivot_swing_by_tf=pivot_swing_by_tf,
+        liberal_swing_override=liberal_swing_override,
+        is_liberal=is_liberal,
+        use_close=use_close,
+        structure_kinds=kinds,
         lookback_mode=entry.structure_lookback,
     )
     if choch is None:

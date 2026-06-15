@@ -6,6 +6,7 @@ continuation:
   structure_max_bars_ago: 120
 pivots:
   swing_size_by_tf:
+    "1M": 5
     "5M": 20
     "15M": 12
     "1H": 4

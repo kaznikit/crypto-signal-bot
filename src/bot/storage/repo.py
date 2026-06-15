@@ -60,6 +60,57 @@ class Repository:
                 conn.execute(text("ALTER TABLE setups ADD COLUMN last_entry_price FLOAT"))
             if "last_entry_swing_level" not in cols:
                 conn.execute(text("ALTER TABLE setups ADD COLUMN last_entry_swing_level FLOAT"))
+            if "entry_cascade_stage" not in cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE setups ADD COLUMN "
+                        "entry_cascade_stage INTEGER NOT NULL DEFAULT 0"
+                    )
+                )
+            if "entry_cascade_since_ms" not in cols:
+                conn.execute(text("ALTER TABLE setups ADD COLUMN entry_cascade_since_ms INTEGER"))
+            if "entry_cascade_touch_ms" not in cols:
+                conn.execute(text("ALTER TABLE setups ADD COLUMN entry_cascade_touch_ms INTEGER"))
+            if "entry_cascade_retrace_level" not in cols:
+                conn.execute(
+                    text("ALTER TABLE setups ADD COLUMN entry_cascade_retrace_level FLOAT")
+                )
+            if "entry_mode" not in cols:
+                conn.execute(
+                    text("ALTER TABLE setups ADD COLUMN entry_mode VARCHAR(16) DEFAULT 'simple'")
+                )
+            if "entry_advanced_stage" not in cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE setups ADD COLUMN "
+                        "entry_advanced_stage VARCHAR(32) DEFAULT 'WAIT_SWEEP'"
+                    )
+                )
+            for column in (
+                "entry_sweep_level",
+                "entry_sweep_extreme",
+                "entry_confirm_level",
+                "entry_target_price",
+            ):
+                if column not in cols:
+                    conn.execute(text(f"ALTER TABLE setups ADD COLUMN {column} FLOAT"))
+            for column in ("entry_sweep_ms", "entry_reclaim_ms", "entry_confirm_ms"):
+                if column not in cols:
+                    conn.execute(text(f"ALTER TABLE setups ADD COLUMN {column} INTEGER"))
+            for column in ("fib_dca_plan_json", "fib_dca_filled_json"):
+                if column not in cols:
+                    conn.execute(text(f"ALTER TABLE setups ADD COLUMN {column} TEXT"))
+            for column in ("fib_dca_average_entry", "fib_dca_filled_weight_pct"):
+                if column not in cols:
+                    default = " DEFAULT 0" if column == "fib_dca_filled_weight_pct" else ""
+                    conn.execute(text(f"ALTER TABLE setups ADD COLUMN {column} FLOAT{default}"))
+            if "fib_dca_last_fill_ms" not in cols:
+                conn.execute(text("ALTER TABLE setups ADD COLUMN fib_dca_last_fill_ms INTEGER"))
+            for column in ("active_trade_stop_price", "active_trade_target_price"):
+                if column not in cols:
+                    conn.execute(text(f"ALTER TABLE setups ADD COLUMN {column} FLOAT"))
+            if "active_trade_tf" not in cols:
+                conn.execute(text("ALTER TABLE setups ADD COLUMN active_trade_tf VARCHAR(8)"))
 
     def upsert_setup(self, setup: Setup) -> None:
         with self._session_factory() as session:
@@ -121,3 +172,6 @@ class Repository:
                 select(Signal).where(Signal.kind.in_(kinds)).order_by(Signal.sent_at)
             ).all()
             return list(rows)
+
+    def load_signals_by_kind(self, kinds: tuple[str, ...]) -> list[Signal]:
+        return self.load_signals_for_export(kinds=kinds)

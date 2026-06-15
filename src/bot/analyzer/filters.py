@@ -25,6 +25,21 @@ def close_beyond_level(close_price: float, level: float, direction: str) -> bool
     return close_price < level
 
 
+def recommended_entry_stop(
+    *,
+    entry: float,
+    direction: str,
+    reset_level: float | None,
+    invalidation_price: float,
+) -> tuple[float, str]:
+    if reset_level is not None:
+        if direction == "LONG" and float(reset_level) < entry:
+            return float(reset_level), "confirm_reset_level"
+        if direction == "SHORT" and float(reset_level) > entry:
+            return float(reset_level), "confirm_reset_level"
+    return float(invalidation_price), "htf_invalidation"
+
+
 def rr_ok(entry: float, sl: float, tp: float, min_rr: float) -> bool:
     risk = abs(entry - sl)
     reward = abs(tp - entry)

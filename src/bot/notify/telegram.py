@@ -12,7 +12,7 @@ from bot.util.time import utcnow
 
 logger = logging.getLogger(__name__)
 
-TV_INTERVAL_MAP: dict[str, str] = {"5M": "5", "15M": "15", "1H": "60", "4H": "240"}
+TV_INTERVAL_MAP: dict[str, str] = {"1M": "1", "5M": "5", "15M": "15", "1H": "60", "4H": "240"}
 
 Payload = dict[str, Any]
 
@@ -42,9 +42,30 @@ class TelegramNotifier:
         self._entry_chat_id = resolved_entry_chat_id
         self._paper_chat_id = paper_chat_id
 
+    def _target_chat(
+        self,
+        paper_mode: bool,
+        liberal_paper_only: bool = False,
+        kind: SignalKind | None = None,
+    ) -> str | None:
+        if liberal_paper_only:
+            return self._paper_chat_id
+        if paper_mode and self._paper_chat_id:
+            return self._paper_chat_id
+        if kind == SignalKind.ENTRY:
+            return self._entry_chat_id
+        return self._prepare_chat_id
+
     @staticmethod
-    def build_signal_id(setup_id: str, kind: str, close_time: int) -> str:
+    def build_signal_id(
+        setup_id: str,
+        kind: str,
+        close_time: int,
+        discriminator: str | None = None,
+    ) -> str:
         raw = f"{setup_id}:{kind}:{close_time}"
+        if discriminator is not None:
+            raw = f"{raw}:{discriminator}"
         return sha256(raw.encode("ascii")).hexdigest()
 
     async def send_event(
@@ -56,21 +77,24 @@ class TelegramNotifier:
         liberal_paper_only: bool = False,
     ) -> Signal | None:
         setup_id = str(payload.get("setup_id", "system"))
-        signal_id = self.build_signal_id(setup_id, kind.value, close_time)
+        discriminator = payload.get("signal_discriminator")
+        signal_id = self.build_signal_id(
+            setup_id,
+            kind.value,
+            close_time,
+            str(discriminator) if discriminator is not None else None,
+        )
         liberal = bool(payload.get("liberal")) or liberal_paper_only
         message = self._format_message(kind=kind, payload=payload, liberal=liberal)
 
-        if liberal_paper_only:
-            if not self._paper_chat_id:
-                logger.warning("Liberal-only signal skipped: TG_PAPER_CHAT_ID is not set")
-                return None
-            target_chat = self._paper_chat_id
-        elif paper_mode and self._paper_chat_id:
-            target_chat = self._paper_chat_id
-        elif kind == SignalKind.ENTRY:
-            target_chat = self._entry_chat_id
-        else:
-            target_chat = self._prepare_chat_id
+        target_chat = self._target_chat(
+            paper_mode=paper_mode,
+            liberal_paper_only=liberal_paper_only,
+            kind=kind,
+        )
+        if target_chat is None:
+            logger.warning("Liberal-only signal skipped: TG_PAPER_CHAT_ID is not set")
+            return None
 
         await self._bot.send_message(
             chat_id=target_chat,
@@ -83,6 +107,14 @@ class TelegramNotifier:
             kind=kind.value,
             payload_json=json.dumps(payload, ensure_ascii=True),
             sent_at=utcnow(),
+        )
+
+    async def send_entry_stats(self, text: str, paper_mode: bool = False) -> None:
+        target_chat = self._target_chat(paper_mode=paper_mode, kind=SignalKind.ENTRY)
+        await self._bot.send_message(
+            chat_id=target_chat,
+            text=text,
+            disable_web_page_preview=True,
         )
 
     def _tv_link_for_payload(self, payload: Payload) -> str | None:
@@ -99,52 +131,63 @@ class TelegramNotifier:
         tv = self._tv_link_for_payload(payload)
         tv_line = f"\nTV: {tv}" if tv else ""
         if kind == SignalKind.PREPARE:
-            ote = f"{payload.get('ote_low')}-{payload.get('ote_high')}"
-            return (
-                f"{prefix}PREPARE {payload.get('type', '')} {symbol} {direction}\n"
-                f"origin={payload.get('origin_price')} ote={ote}\n"
-                f"invalid={payload.get('invalidation_price')} "
-                f"score={payload.get('score', 0)}{tv_line}"
+            is_reentry = bool(payload.get("is_reentry", False))
+            lines = [
+                f"{prefix}PREPARE",
+                str(symbol),
+                str(direction),
+                f"invalidate {payload.get('invalidation_price')}",
+            ]
+            if payload.get("entry_mode") == "fib_dca":
+                for level in payload.get("fib_dca_levels") or []:
+                    lines.append(
+                        f"fib {level.get('fib')} | weight {level.get('weight_pct')}% "
+                        f"| price {level.get('price')}"
+                    )
+            lines.extend(
+                [
+                    f"isReentry {str(is_reentry).lower()}",
+                    f"Score {payload.get('score', 0)}{tv_line}",
+                ]
             )
+            return "\n".join(lines)
         if kind == SignalKind.ENTRY:
-            entry = payload.get("entry", payload.get("origin_price"))
-            sl = payload.get("sl")
-            tp = payload.get("tp1")
-            extra = f" SL={sl} TP1={tp}" if sl is not None and tp is not None else ""
-            entry_tf = payload.get("entry_ltf") or payload.get("htf")
-            setup_tf = payload.get("setup_htf", "")
-            tf_note = f" confirm={entry_tf} setup={setup_tf}" if entry_tf else ""
             entry_idx = payload.get("entry_index")
-            entries_max = payload.get("entries_max")
             idx_num: int | None = None
             if entry_idx is not None:
                 try:
                     idx_num = int(entry_idx)
                 except (TypeError, ValueError):
                     idx_num = None
-            header = "ENTRY"
-            if idx_num == 1:
-                header = "ENTRY-1 [PRIMARY]"
-            elif idx_num == 2:
-                header = "ENTRY-2 [RE-ENTRY]"
-            elif idx_num is not None and idx_num > 2:
-                header = f"ENTRY-{idx_num} [ADD-ON]"
-            idx_note = (
-                f" entry#{entry_idx}/{entries_max}"
-                if entry_idx is not None and entries_max is not None
-                else ""
+            is_reentry = bool(idx_num is not None and idx_num > 1)
+            lines = [
+                f"{prefix}ENTRY",
+                str(symbol),
+                str(direction),
+                f"entry {payload.get('entry')}",
+            ]
+            if payload.get("recommended_stop") is not None:
+                lines.append(f"recommendedStop {payload.get('recommended_stop')}")
+            lines.append(f"invalidate {payload.get('invalidation_price')}")
+            if payload.get("fib") is not None:
+                lines.append(f"fib {payload.get('fib')}")
+            if payload.get("weight_pct") is not None:
+                lines.append(f"weight {payload.get('weight_pct')}%")
+            if payload.get("filled_weight_pct") is not None:
+                lines.append(f"filled {payload.get('filled_weight_pct')}%")
+            if payload.get("average_entry") is not None:
+                lines.append(f"averageEntry {payload.get('average_entry')}")
+            target = payload.get("target_price", payload.get("tp"))
+            if target is not None:
+                lines.append(f"target {target}")
+            lines.extend(
+                [
+                    f"mode {payload.get('entry_mode', 'simple')}",
+                    f"isReentry {str(is_reentry).lower()}",
+                    f"Score {payload.get('score', 0)}{tv_line}",
+                ]
             )
-            confirm_kind = payload.get("confirm_kind")
-            confirm_level = payload.get("confirm_level")
-            confirm_note = ""
-            if confirm_kind and confirm_level is not None:
-                confirm_note = f" {confirm_kind}@{confirm_level}"
-            strategy = payload.get("entry_strategy")
-            strategy_note = f" strategy={strategy}" if strategy else ""
-            return (
-                f"{prefix}{header} {payload.get('type', '')} {symbol} {direction} @ {entry}"
-                f"{extra}{tf_note}{idx_note}{confirm_note}{strategy_note}{tv_line}"
-            )
+            return "\n".join(lines)
         if kind == SignalKind.INVALIDATED:
             return f"{prefix}INVALIDATED {payload.get('type', '')} {symbol}{tv_line}"
         return "HEARTBEAT bot is alive"

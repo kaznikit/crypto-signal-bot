@@ -4,9 +4,10 @@
 
 1. Установите Python 3.11 и git.
 2. Скопируйте проект на VPS в `/home/tradingbot/app`.
-3. Проверьте каталог `config/` и заполните `.env` (`chmod 600`) с отдельными
-   `TG_PREPARE_CHAT_ID` и `TG_ENTRY_CHAT_ID`.
-4. Запустите:
+3. Проверьте файлы модульной конфигурации в `config/`.
+4. Заполните `.env` (`chmod 600`) с отдельными `TG_PREPARE_CHAT_ID` и
+   `TG_ENTRY_CHAT_ID`.
+5. Запустите:
 
 ```bash
 chmod +x deploy/install.sh

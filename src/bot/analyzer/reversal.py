@@ -25,7 +25,8 @@ def detect_reversal_prepare(
     bos_use_close: bool = True,
     ttl_hours: int,
     funnel: Counter[str] | None = None,
-    ltf_expected: str = "5M|15M|1H",
+    ltf_expected: str = "5M",
+    entry_mode: str = "simple",
 ) -> tuple[Setup | None, SetupEvent | None]:
     """PREPARE-reversal как частный случай continuation.
 
@@ -47,6 +48,7 @@ def detect_reversal_prepare(
         structure_max_bars_ago=max_bars_ago_choch,
         prepare_state=None,
         ltf_expected=ltf_expected,
+        entry_mode=entry_mode,
         setup_type=SetupType.REVERSAL,
         anchor_kinds=("CHOCH",),
     )

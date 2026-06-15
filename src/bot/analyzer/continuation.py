@@ -48,6 +48,7 @@ def detect_continuation_prepare(
     structure_max_bars_ago: int = 30,
     prepare_state: ContinuationPrepareState | None = None,
     ltf_expected: str = "5M",
+    entry_mode: str = "simple",
     setup_type: SetupType = SetupType.CONTINUATION,
     anchor_kinds: tuple[str, ...] = ("BOS", "CHOCH"),
 ) -> tuple[Setup | None, SetupEvent | None]:
@@ -210,6 +211,8 @@ def detect_continuation_prepare(
         ttl_hours=ttl_hours,
         phase="WAIT_CHOCH",
         prepare_since_ms=touch_open_ms,
+        entry_mode=entry_mode,
+        entry_target_price=state.impulse.end_price,
     )
     event = SetupEvent(
         kind="PREPARE",

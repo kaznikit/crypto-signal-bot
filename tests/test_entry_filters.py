@@ -1,4 +1,4 @@
-from bot.analyzer.filters import close_beyond_level, finalize_entry_levels
+from bot.analyzer.filters import close_beyond_level, finalize_entry_levels, recommended_entry_stop
 
 
 def test_finalize_entry_levels_skips_when_disabled() -> None:
@@ -54,3 +54,25 @@ def test_finalize_entry_levels_rejects_low_rr() -> None:
     )
     assert levels is None
     assert reject == "rr_below_min"
+
+
+def test_recommended_entry_stop_uses_valid_reset_level() -> None:
+    stop, source = recommended_entry_stop(
+        entry=100.0,
+        direction="LONG",
+        reset_level=98.0,
+        invalidation_price=90.0,
+    )
+    assert stop == 98.0
+    assert source == "confirm_reset_level"
+
+
+def test_recommended_entry_stop_falls_back_when_reset_is_wrong_side() -> None:
+    stop, source = recommended_entry_stop(
+        entry=100.0,
+        direction="LONG",
+        reset_level=102.0,
+        invalidation_price=90.0,
+    )
+    assert stop == 90.0
+    assert source == "htf_invalidation"

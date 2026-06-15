@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class ExchangeConfig(BaseModel):
     name: str
     category: str
+    domain: str = "bybit"
+    tld: str = "com"
 
 
 class SymbolsConfig(BaseModel):
@@ -73,6 +75,7 @@ class PivotsConfig(BaseModel):
 
     swing_size_by_tf: dict[str, int] = Field(
         default_factory=lambda: {
+            "1M": 5,
             "5M": 10,
             "15M": 10,
             "1H": 12,
@@ -87,15 +90,77 @@ class PivotsConfig(BaseModel):
     impulse_max_age_bars: int = 60
 
 
+class EntryAdvancedConfig(BaseModel):
+    """Продвинутый ENTRY: sweep -> reclaim -> CHoCH -> retest."""
+
+    sweep_lookback_bars: int = 48
+    reclaim_max_bars: int = 3
+    confirm_max_bars: int = 12
+    confirm_structure_kinds: list[str] = Field(default_factory=lambda: ["CHOCH"])
+    require_displacement: bool = True
+    require_directional_reclaim: bool = False
+    displacement_body_atr_min: float = 0.8
+    require_volume_expansion: bool = False
+    volume_multiplier: float = 1.3
+    retest_max_bars: int = 12
+    retest_tolerance_atr: float = 0.15
+    stop_source: Literal["retest_extreme", "sweep_extreme"] = "retest_extreme"
+    stop_buffer_atr: float = 0.15
+    max_stop_atr: float = 1.5
+    min_rr_to_htf_target: float = 3.0
+
+
+class FibDcaLevelConfig(BaseModel):
+    fib: float
+    weight_pct: float
+
+
+class FibDcaConfig(BaseModel):
+    """Limit-entry ladder anchored to the PREPARE impulse."""
+
+    monitoring_tf_by_htf: dict[str, str] = Field(
+        default_factory=lambda: {"4H": "5M", "1H": "5M", "15M": "5M"}
+    )
+    levels: list[FibDcaLevelConfig] = Field(
+        default_factory=lambda: [
+            FibDcaLevelConfig(fib=0.5, weight_pct=40.0),
+            FibDcaLevelConfig(fib=0.618, weight_pct=30.0),
+            FibDcaLevelConfig(fib=0.705, weight_pct=20.0),
+            FibDcaLevelConfig(fib=0.786, weight_pct=10.0),
+        ]
+    )
+    stop_source: Literal["htf_invalidation"] = "htf_invalidation"
+    target_source: Literal["impulse_end"] = "impulse_end"
+    cancel_remaining_on_target: bool = True
+    cancel_remaining_on_opposite_structure: bool = True
+
+    @model_validator(mode="after")
+    def validate_levels(self) -> FibDcaConfig:
+        if not self.levels:
+            raise ValueError("entry.fib_dca.levels must not be empty")
+        fibs = [float(level.fib) for level in self.levels]
+        if any(fib <= 0 or fib >= 1 for fib in fibs):
+            raise ValueError("entry.fib_dca.levels fib values must be between 0 and 1")
+        if fibs != sorted(fibs) or len(set(fibs)) != len(fibs):
+            raise ValueError("entry.fib_dca.levels must be unique and sorted by fib")
+        if any(float(level.weight_pct) <= 0 for level in self.levels):
+            raise ValueError("entry.fib_dca.levels weight_pct must be positive")
+        total = sum(float(level.weight_pct) for level in self.levels)
+        if abs(total - 100.0) > 1e-6:
+            raise ValueError("entry.fib_dca.levels weight_pct must sum to 100")
+        return self
+
+
 class EntryConfig(BaseModel):
     """LTF-подтверждение ENTRY после PREPARE на HTF."""
 
-    strategy: str = "structural"
-    # HTF сетапа → LTF для ENTRY (pipe, приоритет слева: «5M|15M|1H» для 4H).
+    # simple — текущий ENTRY по LTF BOS/CHoCH; advanced — sweep/reclaim/CHoCH/retest.
+    mode: Literal["simple", "advanced", "sweep_reclaim", "fib_dca"] = "simple"
+    # HTF сетапа → LTF для ENTRY. Pipe позволяет явно задать несколько TF.
     ltf_by_htf: dict[str, str] = Field(
         default_factory=lambda: {
-            "4H": "5M|15M|1H",
-            "1H": "5M|15M",
+            "4H": "5M",
+            "1H": "5M",
             "15M": "5M",
         }
     )
@@ -103,12 +168,12 @@ class EntryConfig(BaseModel):
     # при ltf_by_htf "5M" инвалидация на 5M убивает сетап до ENTRY.
     invalidation_ltf_by_htf: dict[str, str] = Field(default_factory=dict)
     ltf_swing_length: dict[str, int] = Field(
-        default_factory=lambda: {"5M": 5, "15M": 8, "1H": 12, "4H": 20}
+        default_factory=lambda: {"1M": 4, "5M": 5, "15M": 8, "1H": 12, "4H": 20}
     )
     ltf_max_bars_ago: int = 24
     # Окно свежести LTF BOS/CHoCH по TF (перекрывает ltf_max_bars_ago для указанных TF).
     ltf_max_bars_ago_by_tf: dict[str, int] = Field(
-        default_factory=lambda: {"5M": 48, "15M": 36, "1H": 18}
+        default_factory=lambda: {"1M": 120, "5M": 48, "15M": 36, "1H": 18}
     )
     # False: ENTRY без SL/TP в payload и без фильтра min_rr (только цена + CHoCH).
     compute_sl_tp: bool = True
@@ -123,7 +188,17 @@ class EntryConfig(BaseModel):
     # true — swing для ENTRY = pivots.swing_size_by_tf (как линии BOS на оверлее).
     ltf_swing_use_pivot_sizes: bool = False
     # Максимум ENTRY-сигналов на один setup, пока он остаётся валидным.
-    max_entries_per_setup: int = 2
+    max_entries_per_setup: int = 1
+    # Каскадный ENTRY: после PREPARE на HTF подтверждение идёт по цепочке TF,
+    # например 1H -> 5M BOS/CHoCH -> 1M BOS/CHoCH.
+    cascade_enabled: bool = False
+    cascade_by_htf: dict[str, str] = Field(default_factory=lambda: {"1H": "5M|1M"})
+    cascade_retrace_level: float = 0.5
+    cascade_confirm_structure_kinds: list[str] = Field(
+        default_factory=lambda: ["BOS", "CHOCH"]
+    )
+    advanced: EntryAdvancedConfig = Field(default_factory=EntryAdvancedConfig)
+    fib_dca: FibDcaConfig = Field(default_factory=FibDcaConfig)
 
 
 class FiltersConfig(BaseModel):
@@ -136,15 +211,12 @@ class RiskConfig(BaseModel):
     tp_r_multiples: list[float] = Field(default_factory=lambda: [2.0, 3.0])
 
 
-class ResearchConfig(BaseModel):
-    max_expanded_bars_per_tf: int = 4_000
-
-
 class TelegramConfig(BaseModel):
     prepare_chat_id_env: str = "TG_PREPARE_CHAT_ID"
     entry_chat_id_env: str = "TG_ENTRY_CHAT_ID"
     fallback_chat_id_env: str = "TG_CHAT_ID"
     paper_chat_id_env: str = "TG_PAPER_CHAT_ID"
+    send_prepare_signals: bool = True
 
 
 class LiberalConfig(BaseModel):
@@ -160,13 +232,49 @@ class LiberalConfig(BaseModel):
     # ретрейс к OTE успел дойти до зоны даже после длинного бокового движения).
     max_bars_ago_4h: int = 50
     ltf_swing_length_override: dict[str, int] = Field(
-        default_factory=lambda: {"5M": 5, "15M": 8, "1H": 10}
+        default_factory=lambda: {"1M": 3, "5M": 5, "15M": 8, "1H": 10}
     )
 
 
 class PaperModeConfig(BaseModel):
     enabled: bool = True
+    paper_chat_id_env: str = "TG_PAPER_CHAT_ID"
     liberal: LiberalConfig = Field(default_factory=LiberalConfig)
+
+
+class HistoryReplayConfig(BaseModel):
+    # Upper bound для авторасширения младших TF в history replay/export.
+    # Для каскада 1H -> 15M -> 5M -> 1M нужен глубокий 1M-ряд:
+    # 1000 свечей 1H = до 60000 свечей 1M.
+    max_expanded_bars_per_tf: int = 4_000
+
+
+class EntryStatsConfig(BaseModel):
+    enabled: bool = True
+    check_interval_hours: int = 24
+    max_candidates_per_run: int = 25
+
+
+class PrepareStatsConfig(BaseModel):
+    enabled: bool = True
+    check_interval_hours: int = 24
+    max_candidates_per_run: int = 25
+    evaluation_tf_by_htf: dict[str, str] = Field(
+        default_factory=lambda: {"4H": "5M", "1H": "5M", "15M": "1M"}
+    )
+    # Empty means use entry.fib_dca.levels.
+    fib_levels: list[float] = Field(default_factory=list)
+    target_source: Literal["impulse_end"] = "impulse_end"
+    invalidation_source: Literal["setup_invalidation"] = "setup_invalidation"
+
+    @model_validator(mode="after")
+    def validate_fib_levels(self) -> PrepareStatsConfig:
+        fibs = [float(fib) for fib in self.fib_levels]
+        if any(fib <= 0 or fib >= 1 for fib in fibs):
+            raise ValueError("prepare_stats.fib_levels values must be between 0 and 1")
+        if fibs != sorted(fibs) or len(set(fibs)) != len(fibs):
+            raise ValueError("prepare_stats.fib_levels must be unique and sorted")
+        return self
 
 
 class StrategyFeaturesConfig(BaseModel):
@@ -203,9 +311,11 @@ class BotConfig(BaseModel):
     entry: EntryConfig = Field(default_factory=EntryConfig)
     filters: FiltersConfig
     risk: RiskConfig
-    research: ResearchConfig = Field(default_factory=ResearchConfig)
     telegram: TelegramConfig
     paper_mode: PaperModeConfig
+    history_replay: HistoryReplayConfig = Field(default_factory=HistoryReplayConfig)
+    entry_stats: EntryStatsConfig = Field(default_factory=EntryStatsConfig)
+    prepare_stats: PrepareStatsConfig = Field(default_factory=PrepareStatsConfig)
     strategy_features: StrategyFeaturesConfig = Field(default_factory=StrategyFeaturesConfig)
 
     def prepare_htfs(self) -> tuple[str, ...]:
@@ -266,7 +376,10 @@ def find_bot_config_source(start: Path | None = None) -> Path:
         legacy = candidate / "config.yaml"
         if legacy.exists():
             return legacy
-    msg = "Не найден config/ или config.yaml (запускайте из каталога crypto-signal-bot)."
+        example = candidate / "config.example.yaml"
+        if example.exists():
+            return example
+    msg = "Не найден config/, config.yaml или config.example.yaml."
     raise SystemExit(msg)
 
 

@@ -34,7 +34,7 @@ def _find_config_path() -> Path:
 
 
 def _tv_link(symbol: str, tf: str, exchange: str = "BYBIT") -> str:
-    interval_map = {"5M": "5", "15M": "15", "1H": "60", "4H": "240"}
+    interval_map = {"1M": "1", "5M": "5", "15M": "15", "1H": "60", "4H": "240"}
     interval = interval_map.get(tf, "240")
     return f"https://www.tradingview.com/chart/?symbol={exchange}:{symbol}&interval={interval}"
 
@@ -56,6 +56,8 @@ async def run_reversal_probe(
         category=cfg.exchange.category,
         api_key=env.bybit_api_key,
         api_secret=env.bybit_api_secret,
+        domain=cfg.exchange.domain,
+        tld=cfg.exchange.tld,
     )
     candles = await client.fetch_klines(symbol=symbol, timeframe="4H", limit=limit)
     df = candles_to_df(candles)

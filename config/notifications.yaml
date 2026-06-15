@@ -3,3 +3,4 @@ telegram:
   entry_chat_id_env: TG_ENTRY_CHAT_ID
   fallback_chat_id_env: TG_CHAT_ID
   paper_chat_id_env: TG_PAPER_CHAT_ID
+  send_prepare_signals: true

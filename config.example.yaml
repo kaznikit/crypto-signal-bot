@@ -1,0 +1,144 @@
+exchange:
+  name: bybit
+  category: linear
+  domain: bytick
+  tld: com
+symbols:
+  mode: top_by_volume
+  count: 50
+  quote: USDT
+timeframes: [4H, 1H]
+reversal:
+  ttl_bars_4h: 8
+  choch_lookback_bars: 30
+continuation:
+  fib_low: 0.5
+  structure_max_bars_ago: 120
+pivots:
+  swing_size_by_tf:
+    "1M": 5
+    "5M": 20
+    "15M": 12
+    "1H": 4
+    "4H": 7
+  bos_use_close: true
+  impulse_max_age_bars: 120
+entry:
+  mode: simple
+  ltf_by_htf:
+    "4H": "5M"
+    "1H": "5M"
+    "15M": "5M"
+  invalidation_ltf_by_htf:
+    "4H": "4H"
+    "1H": "1H"
+    "15M": "15M"
+  ltf_swing_length:
+    "1M": 4
+    "5M": 8
+    "15M": 6
+    "1H": 8
+  ltf_swing_use_pivot_sizes: false
+  max_entries_per_setup: 1
+  ltf_max_bars_ago: 24
+  ltf_max_bars_ago_by_tf:
+    "1M": 120
+    "5M": 96
+    "15M": 36
+    "1H": 18
+  compute_sl_tp: false
+  require_close_beyond_choch: false
+  confirm_structure_kinds: [CHOCH, BOS]
+  structure_lookback: since_prepare
+  confirm_mode: structure_break
+  cascade_enabled: false
+  cascade_by_htf:
+    "1H": "5M|1M"
+  cascade_confirm_structure_kinds: [BOS, CHOCH]
+  advanced:
+    sweep_lookback_bars: 48
+    reclaim_max_bars: 3
+    confirm_max_bars: 12
+    confirm_structure_kinds: [CHOCH]
+    require_displacement: true
+    require_directional_reclaim: false
+    displacement_body_atr_min: 0.8
+    require_volume_expansion: false
+    volume_multiplier: 1.3
+    retest_max_bars: 12
+    retest_tolerance_atr: 0.15
+    stop_source: retest_extreme
+    stop_buffer_atr: 0.15
+    max_stop_atr: 1.5
+    min_rr_to_htf_target: 3.0
+  fib_dca:
+    monitoring_tf_by_htf:
+      "4H": "5M"
+      "1H": "5M"
+      "15M": "5M"
+    levels:
+      - fib: 0.5
+        weight_pct: 40
+      - fib: 0.618
+        weight_pct: 30
+      - fib: 0.705
+        weight_pct: 20
+      - fib: 0.786
+        weight_pct: 10
+    stop_source: htf_invalidation
+    target_source: impulse_end
+    cancel_remaining_on_target: true
+    cancel_remaining_on_opposite_structure: true
+filters:
+  min_atr_pct: 0.3
+  min_rr: 1.5
+risk:
+  sl_buffer_atr: 0.5
+  tp_r_multiples: [2, 3]
+telegram:
+  prepare_chat_id_env: TG_PREPARE_CHAT_ID
+  entry_chat_id_env: TG_ENTRY_CHAT_ID
+  fallback_chat_id_env: TG_CHAT_ID
+  paper_chat_id_env: TG_PAPER_CHAT_ID
+  send_prepare_signals: true
+paper_mode:
+  enabled: true
+  paper_chat_id_env: TG_PAPER_CHAT_ID
+  liberal:
+    enabled: true
+    min_atr_pct: 0.15
+    min_rr: 1.2
+    min_quality_score: 0
+    fib_low: 0.382
+    fib_high: 0.786
+    max_bars_ago_4h: 50
+    ltf_swing_length_override:
+      "1M": 3
+      "5M": 5
+      "15M": 8
+      "1H": 10
+history_replay:
+  max_expanded_bars_per_tf: 60000
+entry_stats:
+  enabled: true
+  check_interval_hours: 24
+  max_candidates_per_run: 25
+prepare_stats:
+  enabled: true
+  check_interval_hours: 24
+  max_candidates_per_run: 25
+  evaluation_tf_by_htf:
+    "4H": "5M"
+    "1H": "5M"
+    "15M": "1M"
+  fib_levels: []
+  target_source: impulse_end
+  invalidation_source: setup_invalidation
+strategy_features:
+  require_liquidity_grab_reversal: false
+  quality_score_enabled: true
+  min_quality_score: 20
+  volume_expansion_in_score: true
+  continuation_require_4h_alignment: false
+  require_ob_or_fvg_in_ote: false
+  swing_length_ob_fvg: 10

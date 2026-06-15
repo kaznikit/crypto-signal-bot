@@ -1,2 +1,17 @@
-research:
-  max_expanded_bars_per_tf: 4000
+history_replay:
+  max_expanded_bars_per_tf: 60000
+entry_stats:
+  enabled: true
+  check_interval_hours: 24
+  max_candidates_per_run: 25
+prepare_stats:
+  enabled: true
+  check_interval_hours: 24
+  max_candidates_per_run: 25
+  evaluation_tf_by_htf:
+    "4H": "5M"
+    "1H": "5M"
+    "15M": "1M"
+  fib_levels: []
+  target_source: impulse_end
+  invalidation_source: setup_invalidation

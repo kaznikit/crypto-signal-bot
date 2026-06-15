@@ -11,35 +11,25 @@ Python-бот для сигналов по крипте на базе CHoCH + Fi
 5. `cp .env.example .env`
 6. Заполните `TG_BOT_TOKEN`, `TG_PREPARE_CHAT_ID`, `TG_ENTRY_CHAT_ID`
    (для paper — `TG_PAPER_CHAT_ID`). Старый `TG_CHAT_ID` работает как fallback.
-7. `python -m bot`
+7. При необходимости поправьте файлы в `config/`.
+8. `python -m bot`
 
 Рабочий каталог должен быть `crypto-signal-bot`, чтобы находился каталог `config/`.
+Единый `config.example.yaml` сохранён как legacy-пример и fallback.
 
-## Конфигурация по модулям
-
-Конфигурация разделена по ответственности:
+### Конфигурация по модулям
 
 | Файл | Назначение |
 |------|------------|
 | `config/runtime.yaml` | Биржа, символы, HTF и paper-mode |
 | `config/setup.yaml` | Поиск сетапов: pivots, Fib, reversal/continuation и quality gates |
-| `config/entry.yaml` | LTF-подтверждение, re-entry и входные фильтры |
+| `config/entry.yaml` | Simple/cascade/advanced/sweep/DCA режимы входа |
 | `config/risk.yaml` | SL/TP и параметры риска |
-| `config/research.yaml` | Параметры исторического replay |
-| `config/notifications.yaml` | Переменные окружения Telegram-каналов |
+| `config/research.yaml` | Replay и статистика |
+| `config/notifications.yaml` | Маршрутизация Telegram |
 
-Загрузчик всё ещё поддерживает старый единый `config.yaml` как fallback, но файлы
-из `config/` имеют приоритет.
-
-Telegram-маршрутизация:
-
-- `PREPARE`, `INVALIDATED`, `HEARTBEAT` → `TG_PREPARE_CHAT_ID`;
-- `ENTRY` / `RE-ENTRY` → `TG_ENTRY_CHAT_ID`;
-- paper/liberal-события → `TG_PAPER_CHAT_ID`.
-
-Текущие правила входа вынесены в `bot.entry_engine.StructuralEntryStrategy`.
-Выбор реализации задаётся через `entry.strategy` в `config/entry.yaml`; live и
-history replay используют одну и ту же entry-стратегию.
+`PREPARE`, `INVALIDATED` и heartbeat идут в `TG_PREPARE_CHAT_ID`; `ENTRY` и
+entry-статистика — в `TG_ENTRY_CHAT_ID`; paper/liberal — в `TG_PAPER_CHAT_ID`.
 
 ## Pivot-стек: импульсы и структура по Pine-индикатору
 
@@ -83,8 +73,7 @@ Pine-индикатора `Market Structure` by Leviathan** — пользова
 
 ## Включение опций стратегии
 
-Все переключатели в [`config/setup.yaml`](config/setup.yaml), секция
-**`strategy_features`**:
+Все переключатели — в `config/setup.yaml`, секция **`strategy_features`**:
 
 | Параметр | Назначение |
 |----------|------------|
@@ -106,6 +95,104 @@ Pine-индикатора `Market Structure` by Leviathan** — пользова
 Параметры: `min_atr_pct`, `min_rr`, `min_quality_score`, `max_bars_ago_4h` (окно CHoCH на 4H шире), `ltf_swing_length_override` (ещё мягче LTF CHoCH для ENTRY). Сетапы помечаются `is_liberal` в БД; ENTRY/INVALIDATED для них уходят только в paper.
 
 После изменения флагов перезапустите процесс бота.
+
+### Cascade ENTRY (`entry.cascade_*`)
+
+`entry.cascade_enabled: true` включает многоступенчатое подтверждение вместо
+мгновенного ENTRY по одному LTF BOS/CHoCH. Для `1H` текущая цепочка:
+
+```yaml
+entry:
+  cascade_enabled: true
+  cascade_by_htf:
+    "1H": "5M|1M"
+  cascade_confirm_structure_kinds: [BOS, CHOCH]
+```
+
+Логика: PREPARE на 1H уже означает касание 0.5; дальше бот ждёт BOS/CHoCH на
+5M, затем BOS/CHoCH на 1M строго после 5M-пробоя и сразу отправляет ENTRY.
+Дополнительный откат на 5M/1M больше не требуется. Прогресс хранится в setup,
+поэтому перезапуск процесса не сбрасывает пройденные стадии.
+
+### Advanced ENTRY (`entry.mode: advanced`)
+
+`entry.mode` переключает механику подтверждения:
+
+- `simple` — прежний вход по LTF BOS/CHoCH;
+- `advanced` — последовательность `sweep -> reclaim -> CHoCH -> retest`.
+- `sweep_reclaim` — ранний вход сразу после sweep и возврата закрытия за
+  снятый уровень, без обязательного CHoCH/retest.
+
+Advanced-режим хранит прогресс в setup и переживает перезапуск процесса.
+После `PREPARE` он ждёт снятие ближайшего LTF pivot-low/pivot-high, возврат
+закрытия за снятый уровень, свежий CHoCH и его ретест. Рекомендованный короткий
+стоп по умолчанию ставится за экстремум retest-свечи с ATR-буфером, а
+sweep-extreme остаётся уровнем инвалидации FSM. Через `advanced.stop_source`
+можно вернуть более широкий стоп за sweep-extreme. Целевой уровень берётся из
+вершины HTF-импульса. Перед ENTRY проверяются максимальная ширина стопа и RR до
+HTF-цели. `advanced` игнорирует cascade-цепочку.
+
+В `sweep_reclaim` стоп ставится за sweep-extreme с ATR-буфером. Перед входом
+проверяются displacement/volume reclaim-свечи, максимальная ширина стопа и RR
+до HTF-цели. Режим даёт больше и более ранние сигналы, но подтверждение слабее,
+чем у полного `advanced`. `advanced.require_directional_reclaim: true`
+дополнительно требует бычье тело для LONG и медвежье для SHORT; по умолчанию
+выключено, поскольку закрытие обратно за снятым уровнем уже является reclaim.
+
+Основные настройки находятся в `entry.advanced`: окна стадий, displacement и
+volume-фильтры, ATR-буфер стопа, максимальная ширина стопа и минимальный RR.
+ENTRY-сообщение всегда содержит `recommendedStop`; `invalidate` остаётся
+отдельным HTF-уровнем смерти всего setup.
+
+Для post-entry статистики сделки `advanced` и `sweep_reclaim` считаются
+успешными, если цена раньше обновила `target_price` ближайшего HTF-импульса, и
+неуспешными, если раньше ушла за `recommendedStop`. Если оба уровня задеты
+одной свечой, статистика консервативно считает первым стоп.
+
+### Fib DCA ENTRY (`entry.mode: fib_dca`)
+
+`fib_dca` использует PREPARE как основание для заранее ограниченной лестницы
+лимитных входов и не ждёт LTF BOS/CHoCH. Уровни и доли позиции задаются в
+`entry.fib_dca.levels`; сумма `weight_pct` должна быть равна 100.
+
+```yaml
+entry:
+  mode: fib_dca
+  fib_dca:
+    monitoring_tf_by_htf:
+      "4H": "5M"
+      "1H": "5M"
+    levels:
+      - {fib: 0.500, weight_pct: 40}
+      - {fib: 0.618, weight_pct: 30}
+      - {fib: 0.705, weight_pct: 20}
+      - {fib: 0.786, weight_pct: 10}
+```
+
+План рассчитывается от импульса PREPARE и фиксируется в setup, поэтому
+перезапуск процесса или изменение конфига не меняет активную лестницу. Каждое
+новое касание уровня отправляет отдельный ENTRY с `fib`, `weight`,
+`filled` и `averageEntry`. Общий стоп остаётся на HTF-инвалидации, цель —
+вершина HTF-импульса. Заполненные уровни в history replay считаются одной
+агрегированной позицией; полный стоп полностью заполненной сетки равен `-1R`.
+
+Независимо от режима ENTRY на одном символе одновременно допускается только
+одна открытая позиция. Пока она не достигла TP или стопа, новые setup не могут
+отправить ENTRY. Для `fib_dca` касания следующих уровней считаются доливками
+той же позиции. При касании стопа отправляется `INVALIDATED`, который в
+TradingView отображается крестиком `X`.
+
+### PREPARE / Fib статистика (`prepare_stats`)
+
+Отдельная периодическая статистика оценивает каждый PREPARE независимо от
+выбранного режима ENTRY. Она показывает, достигнута ли вершина импульса раньше
+инвалидации, какие Fib-уровни были затронуты и самый глубокий уровень до
+результата. Под уровнем, от которого пошло движение, используется объективно
+воспроизводимое правило: самый глубокий настроенный Fib, затронутый до цели.
+
+Если `prepare_stats.fib_levels` пуст, используются уровни
+`entry.fib_dca.levels`. При одновременном касании цели и инвалидации одной
+свечой результат консервативно считается неуспешным.
 
 ## Тест стратегии на истории
 
@@ -170,11 +257,16 @@ pytest -q tests
 cd crypto-signal-bot
 source .venv/bin/activate
 python -m bot.history_replay --symbol BTCUSDT --mode both --limit 1000
+# точечно как Pine export для 1H, с прогрессом:
+python -m bot.history_replay --symbol HYPEUSDT --mode continuation --limit 1000 --focus-htf 1H --progress
 # или после pip install -e .
 signal-bot-replay --symbol ETHUSDT --mode reversal --limit 1000
 ```
 
 `--mode`: `reversal`, `continuation`, `both` (по умолчанию `both`).
+`--max-expanded-bars-per-tf` переопределяет глубину младших TF. Для каскада
+`1H -> 15M -> 5M -> 1M` месяц истории требует примерно `60000` свечей `1M`;
+иначе финальные ENTRY на истории могут не появиться из-за нехватки `1M`-данных.
 
 ### Плотность сигналов (replay)
 
@@ -316,6 +408,7 @@ signal-bot-export-pine --symbol ETHUSDT --tf 1H --from-replay --mode continuatio
 Параметры `--from-replay`:
 - `--mode {reversal,continuation,both}` — какие сетапы симулировать;
 - `--limit N` — свечей на TF (≤1000, Bybit klines API);
+- `--max-expanded-bars-per-tf N` — cap младших TF при авторасширении истории (`1H -> 1M` при `--limit 1000` требует до `60000`);
 - `--max-markers 400` — режется до N **последних** маркеров (Pine v5 лимит ~500 на индикатор: каждый PREPARE = label+box, ENTRY = label + 2 line, INVALIDATED = label).
 
 ### Pine overlay из `bot.db`
@@ -338,7 +431,10 @@ signal-bot-export-pine --symbol BTCUSDT --tf 4H --include-liberal --out btc_all.
    - **STRUCTURE** (`CHoCH` / `BOS`) — горизонтальная линия от ломаемого пивота до бара пробоя; CHoCH — пунктир, BOS — сплошная.
    - **IMPULSE** — диагональ от HL до HH (LONG) или от LH до LL (SHORT), плюс штриховая 0.5-линия (Pine 0.5-mid), продлённая вперёд от пика на N баров (input `IMPULSE fib forward bars`, дефолт 40). Это ровно те 0.5-линии, которые рисует Pine-индикатор Leviathan'а.
    - **PIVOT** — мини-лейблы `HH` / `LH` / `HL` / `LL` на пивотах. Размер `tiny`, серый фон — те самые буквы из исходного Pine-индикатора.
-4. По умолчанию `--kinds PREPARE,ENTRY,INVALIDATED,STRUCTURE,IMPULSE,PIVOT`. Если нужны только пивоты с импульсами без сетапов: `--kinds IMPULSE,PIVOT`; только структурные события: `--kinds STRUCTURE`; и т.д.
+4. По умолчанию `--kinds PREPARE,ENTRY,INVALIDATED,STRUCTURE,PIVOT`: импульсные
+   диагонали скрыты, чтобы не перегружать график. Для их отображения добавьте
+   `IMPULSE` явно и включите input `Show IMPULSE` в TradingView; например
+   `--kinds PREPARE,ENTRY,INVALIDATED,STRUCTURE,IMPULSE,PIVOT`.
 
 Если нужен обратный канал TV → бот, делайте отдельный webhook-эндпоинт; в этом боте не реализовано.
 
@@ -358,10 +454,10 @@ signal-bot-export-pine --symbol BTCUSDT --tf 4H --include-liberal --out btc_all.
    pip install -e .
    ```
 
-4. **Конфиг и секреты:** положите каталог `config/` рядом с `pyproject.toml`,
-   создайте `.env` (`chmod 600 .env`) с `TG_BOT_TOKEN`, `TG_PREPARE_CHAT_ID`,
+4. **Конфиг и секреты:** проверьте каталог `config/`, создайте `.env`
+   (`chmod 600 .env`) с `TG_BOT_TOKEN`, `TG_PREPARE_CHAT_ID`,
    `TG_ENTRY_CHAT_ID`, при paper — `TG_PAPER_CHAT_ID`, при желании
-   `BYBIT_API_KEY` / `BYBIT_API_SECRET` (для публичных klines ключи не обязательны).
+   `BYBIT_API_KEY` / `BYBIT_API_SECRET`.
 5. **База:** по умолчанию `BOT_DB_URL=sqlite:///./bot.db` — файл появится в текущей директории при первом запуске.
 6. **Systemd:** используйте [`deploy/install.sh`](deploy/install.sh) и [`deploy/tradingbot.service`](deploy/tradingbot.service) из этого репозитория; подробности в [`deploy/README.md`](deploy/README.md).
 7. **Проверка:** `sudo systemctl status tradingbot`, логи: `sudo journalctl -u tradingbot -f`.

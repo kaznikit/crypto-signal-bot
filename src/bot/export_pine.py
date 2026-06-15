@@ -151,7 +151,7 @@ def _collect_arrays(
         if tf:
             row_tf = str(ev.get("htf") or "")
             setup_tf = str(ev.get("setup_htf") or "")
-            if kind == "ENTRY":
+            if kind in {"ENTRY", "INVALIDATED"}:
                 if row_tf != tf and setup_tf != tf:
                     continue
             elif row_tf != tf:
@@ -175,10 +175,14 @@ def _collect_arrays(
         elif kind == "ENTRY":
             prices.append(float(ev.get("entry") or 0))
             sl = ev.get("sl")
+            if sl is None:
+                sl = ev.get("recommended_stop")
             sls.append(float(sl) if sl is not None else None)
             tp = ev.get("tp1")
             if tp is None:
                 tp = ev.get("tp")
+            if tp is None:
+                tp = ev.get("target_price")
             tps.append(float(tp) if tp is not None else None)
             times2.append(0)
         elif kind == "STRUCTURE":
@@ -291,6 +295,7 @@ def run_export_from_replay(
     limit: int,
     mode: str,
     max_markers: int,
+    max_expanded_bars_per_tf: int | None,
 ) -> None:
     focus_htf = tf if tf in {"4H", "1H", "15M"} else None
     events: list[dict[str, Any]] = []
@@ -304,6 +309,9 @@ def run_export_from_replay(
             events_out=events,
             quiet=True,
             focus_htf=focus_htf,
+            progress=True,
+            overlay_tfs={tf} if tf else None,
+            max_expanded_bars_per_tf=max_expanded_bars_per_tf,
         )
     )
     print(f"Replay produced {len(events)} events before filters")
@@ -334,11 +342,11 @@ def run_export_from_replay(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export bot signals to Pine Script overlay")
     parser.add_argument("--symbol", required=True, help="e.g. BTCUSDT")
-    parser.add_argument("--tf", default=None, help="Filter by HTF (4H, 1H, 15M, 5M)")
+    parser.add_argument("--tf", default=None, help="Filter by TF (4H, 1H, 15M, 5M, 1M)")
     parser.add_argument("--since", default=None, help="UTC date YYYY-MM-DD")
     parser.add_argument(
         "--kinds",
-        default="PREPARE,ENTRY,INVALIDATED,STRUCTURE,IMPULSE,PIVOT",
+        default="PREPARE,ENTRY,INVALIDATED,STRUCTURE,PIVOT",
         help="Comma-separated signal kinds (PREPARE,ENTRY,INVALIDATED,STRUCTURE,IMPULSE,PIVOT)",
     )
     parser.add_argument(
@@ -371,6 +379,12 @@ def main() -> None:
         choices=("reversal", "continuation", "both"),
         help="Какие сетапы симулировать (только для --from-replay)",
     )
+    parser.add_argument(
+        "--max-expanded-bars-per-tf",
+        type=int,
+        default=None,
+        help="Cap для авторасширения младших TF в replay/export",
+    )
     args = parser.parse_args()
 
     kinds_tuple = tuple(k.strip() for k in args.kinds.split(",") if k.strip())
@@ -388,6 +402,7 @@ def main() -> None:
             limit=args.limit,
             mode=args.mode,
             max_markers=args.max_markers,
+            max_expanded_bars_per_tf=args.max_expanded_bars_per_tf,
         )
         return
 
