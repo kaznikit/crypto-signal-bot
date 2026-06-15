@@ -100,6 +100,45 @@ def _df(*, low: float, high: float) -> pd.DataFrame:
     )
 
 
+def test_materialize_comparison_modes_creates_independent_setups() -> None:
+    app = object.__new__(SignalBotApp)
+    app._cfg = SimpleNamespace(
+        entry=EntryConfig(comparison_modes=["simple", "sweep_reclaim", "advanced"])
+    )
+    setup = build_setup(
+        setup_id="prepare-1",
+        symbol="BTCUSDT",
+        setup_type=SetupType.CONTINUATION,
+        direction="LONG",
+        htf="1H",
+        ltf_expected="5M",
+        origin_price=100,
+        ote_low=100,
+        ote_high=100,
+        invalidation_price=90,
+        ttl_hours=24,
+        prepare_since_ms=1_000,
+        entry_target_price=110,
+    )
+    payload = {
+        "setup_id": "prepare-1",
+        "impulse_start_price": 90,
+        "impulse_end_price": 110,
+        "prepare_trigger_fib": 0.5,
+    }
+
+    variants = app._materialize_entry_mode_setups(setup=setup, prepare_payload=payload)
+
+    assert [variant.entry_mode for variant in variants] == [
+        "simple",
+        "sweep_reclaim",
+        "advanced",
+    ]
+    assert {variant.comparison_group_id for variant in variants} == {"prepare-1"}
+    assert len({variant.id for variant in variants}) == 3
+    assert payload["entry_modes"] == ["simple", "sweep_reclaim", "advanced"]
+
+
 def test_live_fib_dca_sends_initial_trigger_fill_without_ltf_confirmation() -> None:
     app = _app()
     setup = _setup()
@@ -156,6 +195,7 @@ def test_live_open_trade_waits_then_emits_invalidated_on_stop() -> None:
 
     assert app._notifier.payloads[0]["invalidation_price"] == 90
     assert app._notifier.payloads[0]["mark_price"] == 95
+    assert app._notifier.payloads[0]["after_entry"] is True
     assert app._repo.states == [("setup-1", "INVALIDATED")]
 
 

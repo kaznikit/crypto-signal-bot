@@ -4,3 +4,4 @@ telegram:
   fallback_chat_id_env: TG_CHAT_ID
   paper_chat_id_env: TG_PAPER_CHAT_ID
   send_prepare_signals: true
+  route_paper_mode_to_paper_chat: false

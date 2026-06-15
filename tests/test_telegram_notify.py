@@ -55,6 +55,21 @@ def test_prepare_message_lists_fib_dca_plan() -> None:
     assert "fib 0.618 | weight 30% | price 97.64" in msg
 
 
+def test_prepare_message_lists_compared_entry_modes() -> None:
+    notifier = TelegramNotifier(bot_token="123456:TEST_TOKEN", chat_id="1")
+    msg = notifier._format_message(
+        kind=SignalKind.PREPARE,
+        payload={
+            "symbol": "BTCUSDT",
+            "direction": "LONG",
+            "invalidation_price": 90,
+            "entry_modes": ["simple", "sweep_reclaim", "advanced"],
+        },
+    )
+
+    assert "entryModes simple, sweep_reclaim, advanced" in msg
+
+
 def test_entry_message_marks_reentry_vertically() -> None:
     notifier = TelegramNotifier(bot_token="123456:TEST_TOKEN", chat_id="1")
     msg = notifier._format_message(
@@ -76,15 +91,17 @@ def test_entry_message_marks_reentry_vertically() -> None:
             "entry_mode": "advanced",
         },
     )
-    assert msg.splitlines()[:8] == [
-        "ENTRY",
+    assert msg.splitlines()[:10] == [
+        "ENTRY [ADVANCED/RETEST #2]",
         "ALTUSDT",
         "LONG",
         "entry 0.0074",
-        "recommendedStop 0.0071",
-        "invalidate 0.0069",
+        "stop 0.0071",
+        "setupInvalidation 0.0069",
         "mode advanced",
+        "variant advanced",
         "isReentry true",
+        "Score 70",
     ]
 
 
@@ -109,15 +126,17 @@ def test_entry_message_marks_primary_entry_vertically() -> None:
             "entry_mode": "simple",
         },
     )
-    assert msg.splitlines()[:8] == [
-        "ENTRY",
+    assert msg.splitlines()[:10] == [
+        "ENTRY [SIMPLE/CHOCH #1]",
         "BTCUSDT",
         "SHORT",
         "entry 106500",
-        "recommendedStop 106850",
-        "invalidate 107000",
+        "stop 106850",
+        "setupInvalidation 107000",
         "mode simple",
+        "variant simple",
         "isReentry false",
+        "Score 60",
     ]
 
 
@@ -161,6 +180,7 @@ def test_notifier_routes_paper_events_to_paper_chat() -> None:
         prepare_chat_id="prepare",
         entry_chat_id="entry",
         paper_chat_id="paper",
+        route_paper_mode_to_paper_chat=True,
     )
     stub = _BotStub()
     notifier._bot = stub
@@ -175,3 +195,74 @@ def test_notifier_routes_paper_events_to_paper_chat() -> None:
     )
 
     assert stub.chat_ids == ["paper"]
+
+
+def test_notifier_keeps_split_chats_for_paper_mode_by_default() -> None:
+    notifier = TelegramNotifier(
+        bot_token="123456:TEST_TOKEN",
+        prepare_chat_id="prepare",
+        entry_chat_id="entry",
+        paper_chat_id="paper",
+    )
+    stub = _BotStub()
+    notifier._bot = stub
+
+    async def send_events() -> None:
+        await notifier.send_event(
+            kind=SignalKind.PREPARE,
+            payload={"setup_id": "prepare", "symbol": "BTCUSDT"},
+            close_time=1,
+            paper_mode=True,
+        )
+        await notifier.send_event(
+            kind=SignalKind.ENTRY,
+            payload={"setup_id": "entry", "symbol": "BTCUSDT"},
+            close_time=2,
+            paper_mode=True,
+        )
+
+    asyncio.run(send_events())
+    assert stub.chat_ids == ["prepare", "entry"]
+
+
+def test_notifier_routes_post_entry_stop_to_entry_chat() -> None:
+    notifier = TelegramNotifier(
+        bot_token="123456:TEST_TOKEN",
+        prepare_chat_id="prepare",
+        entry_chat_id="entry",
+    )
+    stub = _BotStub()
+    notifier._bot = stub
+
+    asyncio.run(
+        notifier.send_event(
+            kind=SignalKind.INVALIDATED,
+            payload={
+                "setup_id": "setup",
+                "symbol": "BTCUSDT",
+                "after_entry": True,
+                "entry_variant": "advanced",
+                "entry_index": 1,
+            },
+            close_time=2,
+        )
+    )
+
+    assert stub.chat_ids == ["entry"]
+
+
+def test_notifier_routes_prepare_and_entry_stats_to_their_chats() -> None:
+    notifier = TelegramNotifier(
+        bot_token="123456:TEST_TOKEN",
+        prepare_chat_id="prepare",
+        entry_chat_id="entry",
+    )
+    stub = _BotStub()
+    notifier._bot = stub
+
+    async def send_stats() -> None:
+        await notifier.send_prepare_stats("prepare stats")
+        await notifier.send_entry_stats("entry stats")
+
+    asyncio.run(send_stats())
+    assert stub.chat_ids == ["prepare", "entry"]

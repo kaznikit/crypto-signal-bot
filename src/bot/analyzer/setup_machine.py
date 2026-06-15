@@ -47,6 +47,7 @@ def build_setup(
     entry_cascade_retrace_level: float | None = None,
     entry_mode: str = "simple",
     entry_target_price: float | None = None,
+    comparison_group_id: str | None = None,
 ) -> Setup:
     now = utcnow()
     return Setup(
@@ -74,6 +75,7 @@ def build_setup(
         entry_cascade_touch_ms=entry_cascade_touch_ms,
         entry_cascade_retrace_level=entry_cascade_retrace_level,
         entry_mode=entry_mode,
+        comparison_group_id=comparison_group_id,
         entry_advanced_stage="WAIT_SWEEP",
         entry_sweep_level=None,
         entry_sweep_extreme=None,
@@ -94,6 +96,39 @@ def build_setup(
         updated_at=now,
         expires_at=now + timedelta(hours=ttl_hours),
     )
+
+
+def clone_setup_for_entry_mode(
+    setup: Setup,
+    *,
+    setup_id: str,
+    entry_mode: str,
+    comparison_group_id: str,
+) -> Setup:
+    clone = build_setup(
+        setup_id=setup_id,
+        symbol=setup.symbol,
+        setup_type=SetupType(setup.type),
+        direction=setup.direction,
+        htf=setup.htf,
+        ltf_expected=setup.ltf_expected,
+        origin_price=setup.origin_price,
+        ote_low=setup.ote_low,
+        ote_high=setup.ote_high,
+        invalidation_price=setup.invalidation_price,
+        ttl_hours=1,
+        score=setup.score,
+        phase=setup.phase,
+        is_liberal=setup.is_liberal,
+        prepare_since_ms=setup.prepare_since_ms,
+        entry_mode=entry_mode,
+        entry_target_price=setup.entry_target_price,
+        comparison_group_id=comparison_group_id,
+    )
+    clone.created_at = setup.created_at
+    clone.updated_at = setup.updated_at
+    clone.expires_at = setup.expires_at
+    return clone
 
 
 def tick_setup(

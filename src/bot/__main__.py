@@ -41,7 +41,7 @@ from bot.analyzer.setup_lifecycle import (
     apply_reset_after_first_entry_policy,
     decide_setup_structure_transition,
 )
-from bot.analyzer.setup_machine import tick_setup
+from bot.analyzer.setup_machine import clone_setup_for_entry_mode, tick_setup
 from bot.analyzer.setup_runtime import check_price_invalidation, resolve_ltf_confirmation
 from bot.analyzer.strategy_gates import (
     evaluate_continuation_prepare_detailed,
@@ -153,6 +153,13 @@ def _current_entry_tfs_for_setup(setup: Any, entry_cfg: Any) -> set[str]:
     return {sequence[stage]}
 
 
+def _entry_variant_for_setup(setup: Any, entry_cfg: Any) -> str:
+    mode = str(getattr(setup, "entry_mode", "simple")).lower()
+    if mode != "simple":
+        return mode
+    return "cascade" if cascade_sequence_for_htf(str(setup.htf), entry_cfg) else "simple"
+
+
 class SignalBotApp:
     def __init__(self) -> None:
         self._env = EnvConfig()
@@ -178,6 +185,7 @@ class SignalBotApp:
             ),
             entry_chat_id=self._env.telegram_chat_id(self._cfg.telegram.entry_chat_id_env),
             paper_chat_id=self._paper_chat_id,
+            route_paper_mode_to_paper_chat=self._cfg.telegram.route_paper_mode_to_paper_chat,
         )
         self._scheduler = TimeframeScheduler()
         self._latest_4h_series: dict[str, Any] = {}
@@ -260,6 +268,48 @@ class SignalBotApp:
             paper_mode=self._cfg.paper_mode.enabled,
             liberal_paper_only=liberal_paper_only,
         )
+
+    def _materialize_entry_mode_setups(
+        self,
+        *,
+        setup: Any,
+        prepare_payload: dict[str, Any],
+    ) -> list[Any]:
+        modes = self._cfg.entry.active_modes()
+        group_id = str(setup.id)
+        prepare_payload["entry_modes"] = list(modes)
+        if len(modes) == 1:
+            setup.entry_mode = modes[0]
+            setup.comparison_group_id = group_id
+            initialize_fib_dca_setup(
+                setup=setup,
+                prepare_payload=prepare_payload,
+                config=self._cfg.entry.fib_dca,
+            )
+            return [setup]
+
+        variants: list[Any] = []
+        fib_prepare_payload: dict[str, Any] | None = None
+        for mode in modes:
+            variant = clone_setup_for_entry_mode(
+                setup,
+                setup_id=f"{group_id}:{mode}",
+                entry_mode=mode,
+                comparison_group_id=group_id,
+            )
+            variant_payload = dict(prepare_payload)
+            initialize_fib_dca_setup(
+                setup=variant,
+                prepare_payload=variant_payload,
+                config=self._cfg.entry.fib_dca,
+            )
+            if mode == "fib_dca":
+                fib_prepare_payload = variant_payload
+            variants.append(variant)
+        if fib_prepare_payload is not None:
+            prepare_payload["fib_dca_levels"] = fib_prepare_payload.get("fib_dca_levels")
+            prepare_payload["target_price"] = fib_prepare_payload.get("target_price")
+        return variants
 
     async def _maybe_process_entry_stats(self) -> None:
         stats_cfg = self._cfg.entry_stats
@@ -357,7 +407,7 @@ class SignalBotApp:
         if results:
             try:
                 for message in format_prepare_stats_messages(results, fib_levels=fib_levels):
-                    await self._notifier.send_entry_stats(
+                    await self._notifier.send_prepare_stats(
                         message,
                         paper_mode=self._cfg.paper_mode.enabled,
                     )
@@ -520,7 +570,7 @@ class SignalBotApp:
             impulse_max_age_bars=self._cfg.pivots.impulse_max_age_bars,
             bos_use_close=self._cfg.pivots.bos_use_close,
             ltf_expected=rev_ltf,
-            entry_mode=self._cfg.entry.mode,
+            entry_mode=self._cfg.entry.active_modes()[0],
         )
         liberal_wider_choch = False
         if (setup is None or event is None) and liberal_cfg.enabled:
@@ -534,18 +584,12 @@ class SignalBotApp:
                 impulse_max_age_bars=self._cfg.pivots.impulse_max_age_bars,
                 bos_use_close=self._cfg.pivots.bos_use_close,
                 ltf_expected=rev_ltf,
-                entry_mode=self._cfg.entry.mode,
+                entry_mode=self._cfg.entry.active_modes()[0],
             )
             liberal_wider_choch = setup is not None
         if setup is None or event is None:
             funnel["reversal_no_prepare_candidate"] += 1
             return
-        initialize_fib_dca_setup(
-            setup=setup,
-            prepare_payload=event.payload,
-            config=self._cfg.entry.fib_dca,
-        )
-
         dedup_key = (symbol, setup.type, "4H", setup.direction)
         if dedup_key in armed_keys:
             replaced = self._invalidate_active_setups_for_key(
@@ -576,7 +620,12 @@ class SignalBotApp:
                 score=score,
                 liberal=False,
             )
-            self._repo.upsert_setup(setup)
+            variants = self._materialize_entry_mode_setups(
+                setup=setup,
+                prepare_payload=event.payload,
+            )
+            for variant in variants:
+                self._repo.upsert_setup(variant)
             signal_row = await self._send_prepare_event(
                 payload=event.payload,
                 close_time=bar_open_ms,
@@ -584,7 +633,7 @@ class SignalBotApp:
             if signal_row is not None:
                 self._repo.save_signal(signal_row)
             armed_keys.add(dedup_key)
-            active_by_key[dedup_key] = [setup]
+            active_by_key[dedup_key] = variants
             funnel["reversal_prepare_sent"] += 1
             return
 
@@ -608,7 +657,12 @@ class SignalBotApp:
                     score=score,
                     liberal=True,
                 )
-                self._repo.upsert_setup(setup)
+                variants = self._materialize_entry_mode_setups(
+                    setup=setup,
+                    prepare_payload=event.payload,
+                )
+                for variant in variants:
+                    self._repo.upsert_setup(variant)
                 signal_row = await self._send_prepare_event(
                     payload=event.payload,
                     close_time=bar_open_ms,
@@ -617,7 +671,7 @@ class SignalBotApp:
                 if signal_row is not None:
                     self._repo.save_signal(signal_row)
                 armed_keys.add(dedup_key)
-                active_by_key[dedup_key] = [setup]
+                active_by_key[dedup_key] = variants
                 funnel["reversal_prepare_sent_liberal"] += 1
                 return
             funnel[f"liberal_{lib_gate.reason}"] += 1
@@ -648,17 +702,11 @@ class SignalBotApp:
             bos_use_close=self._cfg.pivots.bos_use_close,
             ttl_hours=24,
             ltf_expected=ltf_expected_for_htf(htf, self._cfg.entry),
-            entry_mode=self._cfg.entry.mode,
+            entry_mode=self._cfg.entry.active_modes()[0],
         )
         if setup is None or event is None:
             funnel[f"continuation_{htf.lower()}_no_prepare_candidate"] += 1
             return
-        initialize_fib_dca_setup(
-            setup=setup,
-            prepare_payload=event.payload,
-            config=self._cfg.entry.fib_dca,
-        )
-
         dedup_key = (symbol, setup.type, htf, setup.direction)
         if dedup_key in armed_keys:
             replaced = self._invalidate_active_setups_for_key(
@@ -689,7 +737,12 @@ class SignalBotApp:
                 score=score,
                 liberal=False,
             )
-            self._repo.upsert_setup(setup)
+            variants = self._materialize_entry_mode_setups(
+                setup=setup,
+                prepare_payload=event.payload,
+            )
+            for variant in variants:
+                self._repo.upsert_setup(variant)
             signal_row = await self._send_prepare_event(
                 payload=event.payload,
                 close_time=bar_open_ms,
@@ -697,7 +750,7 @@ class SignalBotApp:
             if signal_row is not None:
                 self._repo.save_signal(signal_row)
             armed_keys.add(dedup_key)
-            active_by_key[dedup_key] = [setup]
+            active_by_key[dedup_key] = variants
             funnel[f"continuation_{htf.lower()}_prepare_sent"] += 1
             return
 
@@ -721,7 +774,12 @@ class SignalBotApp:
                     score=score,
                     liberal=True,
                 )
-                self._repo.upsert_setup(setup)
+                variants = self._materialize_entry_mode_setups(
+                    setup=setup,
+                    prepare_payload=event.payload,
+                )
+                for variant in variants:
+                    self._repo.upsert_setup(variant)
                 signal_row = await self._send_prepare_event(
                     payload=event.payload,
                     close_time=bar_open_ms,
@@ -730,7 +788,7 @@ class SignalBotApp:
                 if signal_row is not None:
                     self._repo.save_signal(signal_row)
                 armed_keys.add(dedup_key)
-                active_by_key[dedup_key] = [setup]
+                active_by_key[dedup_key] = variants
                 funnel[f"continuation_{htf.lower()}_prepare_sent_liberal"] += 1
                 return
             funnel[f"liberal_{lib_gate.reason}"] += 1
@@ -747,20 +805,25 @@ class SignalBotApp:
         active = [s for s in self._repo.load_active_setups() if s.symbol == symbol]
         liberal_cfg = self._cfg.paper_mode.liberal
         max_entries_per_setup = max(1, int(self._cfg.entry.max_entries_per_setup))
+        comparison_enabled = self._cfg.entry.comparison_enabled()
         htf_breaks_cache: dict[str, list[Any]] = {}
-        position_setup_id = next(
-            (
-                setup.id
-                for setup in active
-                if getattr(setup, "active_trade_stop_price", None) is not None
-                or (
-                    str(getattr(setup, "entry_mode", "simple")).lower() == "fib_dca"
-                    and bool(
-                        deserialize_filled_fibs(getattr(setup, "fib_dca_filled_json", None))
+        position_setup_id = (
+            None
+            if comparison_enabled
+            else next(
+                (
+                    setup.id
+                    for setup in active
+                    if getattr(setup, "active_trade_stop_price", None) is not None
+                    or (
+                        str(getattr(setup, "entry_mode", "simple")).lower() == "fib_dca"
+                        and bool(
+                            deserialize_filled_fibs(getattr(setup, "fib_dca_filled_json", None))
+                        )
                     )
-                )
-            ),
-            None,
+                ),
+                None,
+            )
         )
         if active and not series:
             funnel["active_setups_waiting_no_fresh_ltf"] += len(active)
@@ -870,7 +933,10 @@ class SignalBotApp:
                     closed_tfs=closed_tfs,
                     funnel=funnel,
                 )
-                if deserialize_filled_fibs(getattr(setup, "fib_dca_filled_json", None)):
+                if (
+                    not comparison_enabled
+                    and deserialize_filled_fibs(getattr(setup, "fib_dca_filled_json", None))
+                ):
                     position_setup_id = setup.id
                 continue
 
@@ -957,6 +1023,9 @@ class SignalBotApp:
             payload["confirm_bars_ago"] = int(choch.bars_ago)
             payload["confirm_broken_open_ms"] = choch.broken_open_ms
             payload["confirm_reset_level"] = choch.reset_level
+            payload["prepare_setup_id"] = str(
+                getattr(setup, "comparison_group_id", None) or setup.id
+            )
 
             if event.kind == "ENTRY":
                 payload["entry"] = float(row["close"])
@@ -1007,6 +1076,7 @@ class SignalBotApp:
                     else simple_stop
                 )
                 payload["entry_mode"] = str(getattr(setup, "entry_mode", "simple"))
+                payload["entry_variant"] = _entry_variant_for_setup(setup, self._cfg.entry)
                 payload["recommended_stop"] = recommended_stop
                 payload["recommended_stop_source"] = (
                     str(ltf_result.recommended_stop_source or "advanced")
@@ -1046,7 +1116,7 @@ class SignalBotApp:
                     levels, reject = finalize_entry_levels(
                         entry=entry_price,
                         direction=setup.direction,
-                        invalidation_price=setup.invalidation_price,
+                        invalidation_price=recommended_stop,
                         compute_sl_tp=self._cfg.entry.compute_sl_tp,
                         min_rr=min_rr,
                     )
@@ -1085,7 +1155,8 @@ class SignalBotApp:
                 )
                 setup.active_trade_tf = used_tf
                 setup.state = "ARMED"
-                position_setup_id = setup.id
+                if not comparison_enabled:
+                    position_setup_id = setup.id
                 setup.updated_at = utcnow()
                 self._repo.upsert_setup(setup)
                 funnel["entry_sent_keep_setup_armed"] += 1
@@ -1115,8 +1186,21 @@ class SignalBotApp:
         bar_open_ms: int,
         mark_price: float,
     ) -> None:
+        entry_count = int(getattr(setup, "entry_count", 0) or 0)
+        after_entry = (
+            entry_count > 0
+            or getattr(setup, "active_trade_stop_price", None) is not None
+            or bool(deserialize_filled_fibs(getattr(setup, "fib_dca_filled_json", None)))
+        )
+        if (
+            not after_entry
+            and self._cfg.entry.comparison_enabled()
+            and str(getattr(setup, "entry_mode", "simple")) != self._cfg.entry.active_modes()[0]
+        ):
+            return
         payload = {
             "setup_id": setup.id,
+            "prepare_setup_id": str(getattr(setup, "comparison_group_id", None) or setup.id),
             "symbol": symbol,
             "type": setup.type,
             "direction": setup.direction,
@@ -1126,6 +1210,10 @@ class SignalBotApp:
             "invalidation_price": float(setup.invalidation_price),
             "mark_price": mark_price,
             "liberal": setup.is_liberal,
+            "entry_mode": str(getattr(setup, "entry_mode", "simple")),
+            "entry_variant": _entry_variant_for_setup(setup, self._cfg.entry),
+            "entry_index": entry_count,
+            "after_entry": after_entry,
         }
         signal_row = await self._notifier.send_event(
             kind=SignalKind.INVALIDATED,
@@ -1250,6 +1338,9 @@ class SignalBotApp:
             total_weight = filled_weight_pct(plan, next_filled)
             payload: dict[str, Any] = {
                 "setup_id": setup.id,
+                "prepare_setup_id": str(
+                    getattr(setup, "comparison_group_id", None) or setup.id
+                ),
                 "symbol": symbol,
                 "type": setup.type,
                 "direction": setup.direction,
@@ -1259,6 +1350,7 @@ class SignalBotApp:
                 "bar_open_ms": bar_open_ms,
                 "entry": level.price,
                 "entry_mode": "fib_dca",
+                "entry_variant": "fib_dca",
                 "fib": level.fib,
                 "weight_pct": level.weight_pct,
                 "filled_weight_pct": total_weight,

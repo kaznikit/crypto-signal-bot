@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from bot.analyzer.setup_machine import build_setup, tick_setup
+from bot.analyzer.setup_machine import build_setup, clone_setup_for_entry_mode, tick_setup
 from bot.storage.models import SetupState, SetupType
 from bot.util.time import utcnow
 
@@ -79,3 +79,33 @@ def test_tick_expires_with_naive_expires_at() -> None:
     assert state == SetupState.EXPIRED.value
     assert event is not None
     assert event.kind == "EXPIRED"
+
+
+def test_clone_setup_for_entry_mode_has_independent_identity() -> None:
+    setup = build_setup(
+        setup_id="prepare-1",
+        symbol="BTCUSDT",
+        setup_type=SetupType.CONTINUATION,
+        direction="LONG",
+        htf="1H",
+        ltf_expected="5M",
+        origin_price=100.0,
+        ote_low=100.0,
+        ote_high=100.0,
+        invalidation_price=90.0,
+        ttl_hours=24,
+        entry_target_price=110.0,
+    )
+
+    clone = clone_setup_for_entry_mode(
+        setup,
+        setup_id="prepare-1:advanced",
+        entry_mode="advanced",
+        comparison_group_id="prepare-1",
+    )
+
+    assert clone.id == "prepare-1:advanced"
+    assert clone.comparison_group_id == "prepare-1"
+    assert clone.entry_mode == "advanced"
+    assert clone.entry_target_price == 110.0
+    assert clone.expires_at == setup.expires_at

@@ -7,6 +7,7 @@ from typing import Any
 
 from aiogram import Bot
 
+from bot.entry_identity import entry_point_label
 from bot.storage.models import Signal, SignalKind
 from bot.util.time import utcnow
 
@@ -30,6 +31,7 @@ class TelegramNotifier:
         prepare_chat_id: str | None = None,
         entry_chat_id: str | None = None,
         paper_chat_id: str | None = None,
+        route_paper_mode_to_paper_chat: bool = False,
     ) -> None:
         self._bot = Bot(token=bot_token)
         resolved_prepare_chat_id = prepare_chat_id or chat_id
@@ -41,18 +43,22 @@ class TelegramNotifier:
         self._prepare_chat_id = resolved_prepare_chat_id
         self._entry_chat_id = resolved_entry_chat_id
         self._paper_chat_id = paper_chat_id
+        self._route_paper_mode_to_paper_chat = route_paper_mode_to_paper_chat
 
     def _target_chat(
         self,
         paper_mode: bool,
         liberal_paper_only: bool = False,
         kind: SignalKind | None = None,
+        payload: Payload | None = None,
     ) -> str | None:
         if liberal_paper_only:
             return self._paper_chat_id
-        if paper_mode and self._paper_chat_id:
+        if paper_mode and self._paper_chat_id and self._route_paper_mode_to_paper_chat:
             return self._paper_chat_id
-        if kind == SignalKind.ENTRY:
+        if kind == SignalKind.ENTRY or (
+            kind == SignalKind.INVALIDATED and bool((payload or {}).get("after_entry"))
+        ):
             return self._entry_chat_id
         return self._prepare_chat_id
 
@@ -91,6 +97,7 @@ class TelegramNotifier:
             paper_mode=paper_mode,
             liberal_paper_only=liberal_paper_only,
             kind=kind,
+            payload=payload,
         )
         if target_chat is None:
             logger.warning("Liberal-only signal skipped: TG_PAPER_CHAT_ID is not set")
@@ -111,6 +118,16 @@ class TelegramNotifier:
 
     async def send_entry_stats(self, text: str, paper_mode: bool = False) -> None:
         target_chat = self._target_chat(paper_mode=paper_mode, kind=SignalKind.ENTRY)
+        assert target_chat is not None
+        await self._bot.send_message(
+            chat_id=target_chat,
+            text=text,
+            disable_web_page_preview=True,
+        )
+
+    async def send_prepare_stats(self, text: str, paper_mode: bool = False) -> None:
+        target_chat = self._target_chat(paper_mode=paper_mode, kind=SignalKind.PREPARE)
+        assert target_chat is not None
         await self._bot.send_message(
             chat_id=target_chat,
             text=text,
@@ -150,6 +167,8 @@ class TelegramNotifier:
                     f"Score {payload.get('score', 0)}{tv_line}",
                 ]
             )
+            if payload.get("entry_modes"):
+                lines.append(f"entryModes {', '.join(payload['entry_modes'])}")
             return "\n".join(lines)
         if kind == SignalKind.ENTRY:
             entry_idx = payload.get("entry_index")
@@ -160,15 +179,18 @@ class TelegramNotifier:
                 except (TypeError, ValueError):
                     idx_num = None
             is_reentry = bool(idx_num is not None and idx_num > 1)
+            point = entry_point_label(payload)
             lines = [
-                f"{prefix}ENTRY",
+                f"{prefix}ENTRY [{point}]",
                 str(symbol),
                 str(direction),
                 f"entry {payload.get('entry')}",
             ]
             if payload.get("recommended_stop") is not None:
-                lines.append(f"recommendedStop {payload.get('recommended_stop')}")
-            lines.append(f"invalidate {payload.get('invalidation_price')}")
+                lines.append(f"stop {payload.get('recommended_stop')}")
+            if payload.get("recommended_stop_source") is not None:
+                lines.append(f"stopSource {payload.get('recommended_stop_source')}")
+            lines.append(f"setupInvalidation {payload.get('invalidation_price')}")
             if payload.get("fib") is not None:
                 lines.append(f"fib {payload.get('fib')}")
             if payload.get("weight_pct") is not None:
@@ -183,12 +205,15 @@ class TelegramNotifier:
             lines.extend(
                 [
                     f"mode {payload.get('entry_mode', 'simple')}",
+                    f"variant {payload.get('entry_variant', payload.get('entry_mode', 'simple'))}",
                     f"isReentry {str(is_reentry).lower()}",
                     f"Score {payload.get('score', 0)}{tv_line}",
                 ]
             )
             return "\n".join(lines)
         if kind == SignalKind.INVALIDATED:
+            if payload.get("after_entry"):
+                return f"{prefix}STOP [{entry_point_label(payload)}] {symbol}{tv_line}"
             return f"{prefix}INVALIDATED {payload.get('type', '')} {symbol}{tv_line}"
         return "HEARTBEAT bot is alive"
 

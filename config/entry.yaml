@@ -1,5 +1,6 @@
 entry:
   mode: simple
+  comparison_modes: [simple, sweep_reclaim, advanced]
   ltf_by_htf:
     "4H": "5M"
     "1H": "5M"

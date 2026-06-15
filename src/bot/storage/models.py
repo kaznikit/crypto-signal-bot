@@ -67,6 +67,8 @@ class Setup(Base):
     entry_cascade_retrace_level: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Режим ENTRY фиксируется при создании setup, чтобы смена конфига не меняла активный setup.
     entry_mode: Mapped[str] = mapped_column(String(16), default="simple")
+    # Общий PREPARE id для параллельных entry-вариантов одного setup.
+    comparison_group_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     # Состояние advanced ENTRY FSM.
     entry_advanced_stage: Mapped[str] = mapped_column(String(32), default="WAIT_SWEEP")
     entry_sweep_level: Mapped[float | None] = mapped_column(Float, nullable=True)

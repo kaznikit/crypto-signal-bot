@@ -25,6 +25,7 @@ pivots:
   impulse_max_age_bars: 120
 entry:
   mode: simple
+  comparison_modes: [simple, sweep_reclaim, advanced]
   ltf_by_htf:
     "4H": "5M"
     "1H": "5M"
@@ -101,6 +102,7 @@ telegram:
   fallback_chat_id_env: TG_CHAT_ID
   paper_chat_id_env: TG_PAPER_CHAT_ID
   send_prepare_signals: true
+  route_paper_mode_to_paper_chat: false
 paper_mode:
   enabled: true
   paper_chat_id_env: TG_PAPER_CHAT_ID

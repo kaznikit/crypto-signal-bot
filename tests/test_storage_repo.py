@@ -22,4 +22,5 @@ def test_create_schema_adds_fib_dca_setup_columns(tmp_path) -> None:
         "active_trade_stop_price",
         "active_trade_target_price",
         "active_trade_tf",
+        "comparison_group_id",
     } <= columns

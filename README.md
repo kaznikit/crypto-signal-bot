@@ -28,8 +28,9 @@ Python-бот для сигналов по крипте на базе CHoCH + Fi
 | `config/research.yaml` | Replay и статистика |
 | `config/notifications.yaml` | Маршрутизация Telegram |
 
-`PREPARE`, `INVALIDATED` и heartbeat идут в `TG_PREPARE_CHAT_ID`; `ENTRY` и
-entry-статистика — в `TG_ENTRY_CHAT_ID`; paper/liberal — в `TG_PAPER_CHAT_ID`.
+`PREPARE`, pre-entry `INVALIDATED`, heartbeat и PREPARE-статистика идут в
+`TG_PREPARE_CHAT_ID`; `ENTRY`, stop после входа и entry-статистика — в
+`TG_ENTRY_CHAT_ID`. Liberal-only сигналы идут в `TG_PAPER_CHAT_ID`.
 
 ## Pivot-стек: импульсы и структура по Pine-индикатору
 
@@ -85,8 +86,10 @@ Pine-индикатора `Market Structure` by Leviathan** — пользова
 | `require_ob_or_fvg_in_ote` | Требовать пересечение OTE-зоны с **OB или FVG** (`smartmoneyconcepts`). Единственное место, где ещё используется `smc` (OB/FVG никак не связаны с импульсной логикой). |
 | `swing_length_ob_fvg` | Параметр `swing_length` для расчёта OB/FVG в библиотеке. |
 
-**Paper mode:** `paper_mode.enabled: true` в `config/runtime.yaml` — сигналы
-уходят в `TG_PAPER_CHAT_ID`, если он задан в `.env`.
+**Paper mode:** при `paper_mode.enabled: true` обычные сигналы всё равно
+разделяются между PREPARE/ENTRY-чатами. Чтобы вернуть старую маршрутизацию всех
+paper-сигналов в один `TG_PAPER_CHAT_ID`, включите
+`telegram.route_paper_mode_to_paper_chat: true`.
 
 ### Liberal paper-mode (`paper_mode.liberal`)
 
@@ -95,6 +98,30 @@ Pine-индикатора `Market Structure` by Leviathan** — пользова
 Параметры: `min_atr_pct`, `min_rr`, `min_quality_score`, `max_bars_ago_4h` (окно CHoCH на 4H шире), `ltf_swing_length_override` (ещё мягче LTF CHoCH для ENTRY). Сетапы помечаются `is_liberal` в БД; ENTRY/INVALIDATED для них уходят только в paper.
 
 После изменения флагов перезапустите процесс бота.
+
+### Сравнение ENTRY-вариантов
+
+`entry.comparison_modes` запускает в live-цикле несколько независимых логик
+входа от одного PREPARE. В рабочем конфиге одновременно сравниваются:
+
+```yaml
+entry:
+  comparison_modes: [simple, sweep_reclaim, advanced]
+```
+
+Каждый вариант хранит собственное состояние, может отправить свой ENTRY и
+сопровождается по собственному стопу. Открытый вход одного варианта не блокирует
+остальные варианты этой исследовательской группы. `simple` использует reset
+уровень подтверждения с fallback на HTF invalidation, `sweep_reclaim` — sweep
+extreme с ATR-буфером, `advanced` — retest/sweep extreme согласно
+`advanced.stop_source`.
+
+ENTRY-сообщения имеют заголовки вида `ENTRY [SIMPLE/BOS #1]`,
+`ENTRY [SWEEP_RECLAIM/RECLAIM #1]` и `ENTRY [ADVANCED/RETEST #1]`, а также
+отдельные строки `stop`, `stopSource` и `setupInvalidation`. Entry-статистика
+оценивает каждый вариант по его `recommended_stop` и показывает сравнительный
+winrate по вариантам. Если `comparison_modes` пуст, бот запускает только
+`entry.mode`, как раньше.
 
 ### Cascade ENTRY (`entry.cascade_*`)
 

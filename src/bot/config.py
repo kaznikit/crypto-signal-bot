@@ -151,11 +151,17 @@ class FibDcaConfig(BaseModel):
         return self
 
 
+EntryMode = Literal["simple", "advanced", "sweep_reclaim", "fib_dca"]
+
+
 class EntryConfig(BaseModel):
     """LTF-подтверждение ENTRY после PREPARE на HTF."""
 
     # simple — текущий ENTRY по LTF BOS/CHoCH; advanced — sweep/reclaim/CHoCH/retest.
-    mode: Literal["simple", "advanced", "sweep_reclaim", "fib_dca"] = "simple"
+    mode: EntryMode = "simple"
+    # Empty: run only `mode`. Non-empty: create independent setup state for
+    # every listed mode and emit all ENTRY variants from one PREPARE.
+    comparison_modes: list[EntryMode] = Field(default_factory=list)
     # HTF сетапа → LTF для ENTRY. Pipe позволяет явно задать несколько TF.
     ltf_by_htf: dict[str, str] = Field(
         default_factory=lambda: {
@@ -200,6 +206,19 @@ class EntryConfig(BaseModel):
     advanced: EntryAdvancedConfig = Field(default_factory=EntryAdvancedConfig)
     fib_dca: FibDcaConfig = Field(default_factory=FibDcaConfig)
 
+    @model_validator(mode="after")
+    def validate_comparison_modes(self) -> EntryConfig:
+        if len(set(self.comparison_modes)) != len(self.comparison_modes):
+            raise ValueError("entry.comparison_modes must be unique")
+        return self
+
+    def active_modes(self) -> tuple[str, ...]:
+        modes = self.comparison_modes or [self.mode]
+        return tuple(str(mode) for mode in modes)
+
+    def comparison_enabled(self) -> bool:
+        return len(self.active_modes()) > 1
+
 
 class FiltersConfig(BaseModel):
     min_atr_pct: float = 0.3
@@ -217,6 +236,7 @@ class TelegramConfig(BaseModel):
     fallback_chat_id_env: str = "TG_CHAT_ID"
     paper_chat_id_env: str = "TG_PAPER_CHAT_ID"
     send_prepare_signals: bool = True
+    route_paper_mode_to_paper_chat: bool = False
 
 
 class LiberalConfig(BaseModel):

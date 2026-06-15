@@ -79,6 +79,8 @@ class Repository:
                 conn.execute(
                     text("ALTER TABLE setups ADD COLUMN entry_mode VARCHAR(16) DEFAULT 'simple'")
                 )
+            if "comparison_group_id" not in cols:
+                conn.execute(text("ALTER TABLE setups ADD COLUMN comparison_group_id VARCHAR(64)"))
             if "entry_advanced_stage" not in cols:
                 conn.execute(
                     text(

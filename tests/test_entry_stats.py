@@ -108,6 +108,109 @@ def test_entry_stats_candidates_keep_latest_entry_per_setup() -> None:
     assert candidates[0].entry_price == 98
 
 
+def test_entry_stats_keeps_independent_variants_for_same_prepare() -> None:
+    entries = [
+        _signal(
+            "entry-simple",
+            "setup-1:simple",
+            "ENTRY",
+            {
+                "setup_id": "setup-1:simple",
+                "prepare_setup_id": "setup-1",
+                "symbol": "BTCUSDT",
+                "direction": "LONG",
+                "entry_variant": "simple",
+                "entry_mode": "simple",
+                "entry": 100,
+                "recommended_stop": 98,
+                "target_price": 110,
+                "bar_open_ms": 1_000,
+            },
+        ),
+        _signal(
+            "entry-advanced",
+            "setup-1:advanced",
+            "ENTRY",
+            {
+                "setup_id": "setup-1:advanced",
+                "prepare_setup_id": "setup-1",
+                "symbol": "BTCUSDT",
+                "direction": "LONG",
+                "entry_variant": "advanced",
+                "entry_mode": "advanced",
+                "entry": 101,
+                "recommended_stop": 99,
+                "target_price": 110,
+                "bar_open_ms": 2_000,
+            },
+        ),
+    ]
+
+    candidates = build_entry_stats_candidates(entries, {}, set())
+
+    assert {candidate.entry_variant for candidate in candidates} == {"simple", "advanced"}
+
+
+def test_simple_entry_stats_prefers_its_recommended_stop() -> None:
+    candidate = build_entry_stats_candidates(
+        [
+            _signal(
+                "entry-simple",
+                "setup-simple",
+                "ENTRY",
+                {
+                    "setup_id": "setup-simple",
+                    "symbol": "BTCUSDT",
+                    "direction": "LONG",
+                    "entry_mode": "simple",
+                    "entry": 100,
+                    "recommended_stop": 98,
+                    "recommended_stop_source": "confirm_reset_level",
+                    "invalidation_price": 90,
+                    "target_price": 110,
+                    "bar_open_ms": 1_000,
+                },
+            )
+        ],
+        {},
+        set(),
+    )[0]
+
+    assert candidate.invalidation_price == 98
+    assert candidate.stop_source == "confirm_reset_level"
+
+
+def test_entry_stats_treats_exact_stop_touch_as_fail() -> None:
+    candidate = build_entry_stats_candidates(
+        [
+            _signal(
+                "entry-simple",
+                "setup-simple",
+                "ENTRY",
+                {
+                    "setup_id": "setup-simple",
+                    "symbol": "BTCUSDT",
+                    "direction": "LONG",
+                    "entry": 100,
+                    "recommended_stop": 98,
+                    "target_price": 110,
+                    "bar_open_ms": 1_000,
+                },
+            )
+        ],
+        {},
+        set(),
+    )[0]
+
+    result = evaluate_entry_stats_candidate(
+        candidate,
+        [Candle(open_time=2_000, high=105, low=98)],
+    )
+
+    assert result is not None
+    assert result.status == "FAIL"
+
+
 def test_advanced_entry_stats_uses_recommended_stop_and_htf_target() -> None:
     entry = _signal(
         "entry-advanced",
@@ -335,7 +438,9 @@ def test_entry_stats_message_contains_short_summary_only() -> None:
 
     message = format_entry_stats_message([result])
 
-    assert message == "✅ BTCUSDT 1970-01-01 00:00 LONG"
+    assert "SIMPLE: success 1 | fail 0 | winrate 100.0%" in message
+    assert "✅ BTCUSDT 1970-01-01 00:00 LONG | SIMPLE" in message
+    assert "stop 95 [htf_invalidation]" in message
     assert "Trades:" not in message
     assert "Symbol" not in message
 

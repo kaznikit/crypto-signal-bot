@@ -53,9 +53,12 @@ def test_split_config_matches_current_runtime_settings() -> None:
 
     assert cfg.prepare_htfs() == ("4H", "1H")
     assert cfg.entry.mode == "simple"
+    assert cfg.entry.active_modes() == ("simple", "sweep_reclaim", "advanced")
+    assert cfg.entry.comparison_enabled() is True
     assert cfg.history_replay.max_expanded_bars_per_tf == 60_000
     assert cfg.telegram.prepare_chat_id_env == "TG_PREPARE_CHAT_ID"
     assert cfg.telegram.entry_chat_id_env == "TG_ENTRY_CHAT_ID"
+    assert cfg.telegram.route_paper_mode_to_paper_chat is False
 
 
 def test_config_example_entry_cascade_settings_for_1h() -> None:
@@ -116,6 +119,8 @@ def test_entry_max_entries_per_setup_default() -> None:
     )
     assert cfg.entry.max_entries_per_setup == 1
     assert cfg.entry.mode == "simple"
+    assert cfg.entry.active_modes() == ("simple",)
+    assert cfg.entry.comparison_enabled() is False
     assert cfg.entry.ltf_by_htf == {"4H": "5M", "1H": "5M", "15M": "5M"}
     assert cfg.entry.fib_dca.monitoring_tf_by_htf == {
         "4H": "5M",
