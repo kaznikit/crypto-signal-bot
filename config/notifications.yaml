@@ -1,0 +1,5 @@
+telegram:
+  prepare_chat_id_env: TG_PREPARE_CHAT_ID
+  entry_chat_id_env: TG_ENTRY_CHAT_ID
+  fallback_chat_id_env: TG_CHAT_ID
+  paper_chat_id_env: TG_PAPER_CHAT_ID

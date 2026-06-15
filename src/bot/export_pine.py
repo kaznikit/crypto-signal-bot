@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bot.config import EnvConfig
+from bot.config import EnvConfig, find_bot_config_source
 from bot.history_replay import run_history_replay
 from bot.storage.repo import Repository
 
@@ -25,7 +25,7 @@ from bot.storage.repo import Repository
 def _find_config_dir() -> Path:
     cwd = Path.cwd()
     for candidate in (cwd, Path(__file__).resolve().parents[2]):
-        if (candidate / "config.yaml").exists():
+        if (candidate / "config").is_dir() or (candidate / "config.yaml").exists():
             return candidate
     return cwd
 
@@ -42,11 +42,7 @@ def _find_template() -> Path:
 
 
 def _find_config_path() -> Path:
-    p = _find_config_dir() / "config.yaml"
-    if not p.exists():
-        msg = "Не найден config.yaml (запускайте из каталога crypto-signal-bot)."
-        raise SystemExit(msg)
-    return p
+    return find_bot_config_source()
 
 
 def _parse_since(s: str | None) -> int | None:

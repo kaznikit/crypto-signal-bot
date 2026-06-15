@@ -9,10 +9,37 @@ Python-бот для сигналов по крипте на базе CHoCH + Fi
 3. `source .venv/bin/activate`
 4. `pip install -e ".[dev]"`
 5. `cp .env.example .env`
-6. Заполните `TG_BOT_TOKEN`, `TG_CHAT_ID` (для paper — `TG_PAPER_CHAT_ID`).
+6. Заполните `TG_BOT_TOKEN`, `TG_PREPARE_CHAT_ID`, `TG_ENTRY_CHAT_ID`
+   (для paper — `TG_PAPER_CHAT_ID`). Старый `TG_CHAT_ID` работает как fallback.
 7. `python -m bot`
 
-Рабочий каталог должен быть `crypto-signal-bot`, чтобы находился `config.yaml`.
+Рабочий каталог должен быть `crypto-signal-bot`, чтобы находился каталог `config/`.
+
+## Конфигурация по модулям
+
+Конфигурация разделена по ответственности:
+
+| Файл | Назначение |
+|------|------------|
+| `config/runtime.yaml` | Биржа, символы, HTF и paper-mode |
+| `config/setup.yaml` | Поиск сетапов: pivots, Fib, reversal/continuation и quality gates |
+| `config/entry.yaml` | LTF-подтверждение, re-entry и входные фильтры |
+| `config/risk.yaml` | SL/TP и параметры риска |
+| `config/research.yaml` | Параметры исторического replay |
+| `config/notifications.yaml` | Переменные окружения Telegram-каналов |
+
+Загрузчик всё ещё поддерживает старый единый `config.yaml` как fallback, но файлы
+из `config/` имеют приоритет.
+
+Telegram-маршрутизация:
+
+- `PREPARE`, `INVALIDATED`, `HEARTBEAT` → `TG_PREPARE_CHAT_ID`;
+- `ENTRY` / `RE-ENTRY` → `TG_ENTRY_CHAT_ID`;
+- paper/liberal-события → `TG_PAPER_CHAT_ID`.
+
+Текущие правила входа вынесены в `bot.entry_engine.StructuralEntryStrategy`.
+Выбор реализации задаётся через `entry.strategy` в `config/entry.yaml`; live и
+history replay используют одну и ту же entry-стратегию.
 
 ## Pivot-стек: импульсы и структура по Pine-индикатору
 
@@ -39,7 +66,7 @@ Pine-индикатора `Market Structure` by Leviathan** — пользова
   направлении, обратном предыдущему пробою; первый пробой в серии — всегда
   BOS.
 
-Параметры — секция `pivots:` в `config.yaml`:
+Параметры — секция `pivots:` в `config/setup.yaml`:
 
 | Ключ | Что значит |
 |------|-----------|
@@ -56,7 +83,8 @@ Pine-индикатора `Market Structure` by Leviathan** — пользова
 
 ## Включение опций стратегии
 
-Все переключатели в [`config.yaml`](config.yaml), секция **`strategy_features`**:
+Все переключатели в [`config/setup.yaml`](config/setup.yaml), секция
+**`strategy_features`**:
 
 | Параметр | Назначение |
 |----------|------------|
@@ -68,7 +96,8 @@ Pine-индикатора `Market Structure` by Leviathan** — пользова
 | `require_ob_or_fvg_in_ote` | Требовать пересечение OTE-зоны с **OB или FVG** (`smartmoneyconcepts`). Единственное место, где ещё используется `smc` (OB/FVG никак не связаны с импульсной логикой). |
 | `swing_length_ob_fvg` | Параметр `swing_length` для расчёта OB/FVG в библиотеке. |
 
-**Paper mode:** `paper_mode.enabled: true` в `config.yaml` — сигналы уходят в `TG_PAPER_CHAT_ID`, если он задан в `.env`.
+**Paper mode:** `paper_mode.enabled: true` в `config/runtime.yaml` — сигналы
+уходят в `TG_PAPER_CHAT_ID`, если он задан в `.env`.
 
 ### Liberal paper-mode (`paper_mode.liberal`)
 
@@ -99,7 +128,7 @@ signal-bot-history --symbol ETHUSDT --limit 1500 --swing-size 15
 
 Ключевые флаги:
 - `--swing-size` — Pine pivot length (по обе стороны). 10–20 для 4H норм; меньше = чаще пивоты и BOS, но больше шума.
-- `--max-bars-ago` — допустимое «опоздание» между закрытием бара и баром пробоя CHoCH (если не указано — берётся `reversal.choch_lookback_bars` из `config.yaml`).
+- `--max-bars-ago` — допустимое «опоздание» между закрытием бара и баром пробоя CHoCH (если не указано — берётся `reversal.choch_lookback_bars` из `config/setup.yaml`).
 
 Вывод — четыре числа по стадиям:
 
@@ -329,13 +358,17 @@ signal-bot-export-pine --symbol BTCUSDT --tf 4H --include-liberal --out btc_all.
    pip install -e .
    ```
 
-4. **Конфиг и секреты:** положите `config.yaml` рядом с `pyproject.toml`, создайте `.env` (`chmod 600 .env`) с `TG_BOT_TOKEN`, `TG_CHAT_ID`, при paper — `TG_PAPER_CHAT_ID`, при желании `BYBIT_API_KEY` / `BYBIT_API_SECRET` (для публичных klines ключи не обязательны).
+4. **Конфиг и секреты:** положите каталог `config/` рядом с `pyproject.toml`,
+   создайте `.env` (`chmod 600 .env`) с `TG_BOT_TOKEN`, `TG_PREPARE_CHAT_ID`,
+   `TG_ENTRY_CHAT_ID`, при paper — `TG_PAPER_CHAT_ID`, при желании
+   `BYBIT_API_KEY` / `BYBIT_API_SECRET` (для публичных klines ключи не обязательны).
 5. **База:** по умолчанию `BOT_DB_URL=sqlite:///./bot.db` — файл появится в текущей директории при первом запуске.
 6. **Systemd:** используйте [`deploy/install.sh`](deploy/install.sh) и [`deploy/tradingbot.service`](deploy/tradingbot.service) из этого репозитория; подробности в [`deploy/README.md`](deploy/README.md).
 7. **Проверка:** `sudo systemctl status tradingbot`, логи: `sudo journalctl -u tradingbot -f`.
 8. **Ротация логов journald:** `sudo journalctl --vacuum-time=14d`.
 
-Unit в `tradingbot.service` должен указывать `WorkingDirectory` на каталог, где лежат `config.yaml` и `.env`, и `ExecStart=.../python -m bot`.
+Unit в `tradingbot.service` должен указывать `WorkingDirectory` на каталог, где
+лежат `config/` и `.env`, и `ExecStart=.../python -m bot`.
 
 ## Дисклеймер
 

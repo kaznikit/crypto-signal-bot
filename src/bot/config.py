@@ -90,6 +90,7 @@ class PivotsConfig(BaseModel):
 class EntryConfig(BaseModel):
     """LTF-подтверждение ENTRY после PREPARE на HTF."""
 
+    strategy: str = "structural"
     # HTF сетапа → LTF для ENTRY (pipe, приоритет слева: «5M|15M|1H» для 4H).
     ltf_by_htf: dict[str, str] = Field(
         default_factory=lambda: {
@@ -135,8 +136,15 @@ class RiskConfig(BaseModel):
     tp_r_multiples: list[float] = Field(default_factory=lambda: [2.0, 3.0])
 
 
+class ResearchConfig(BaseModel):
+    max_expanded_bars_per_tf: int = 4_000
+
+
 class TelegramConfig(BaseModel):
-    chat_id_env: str = "TG_CHAT_ID"
+    prepare_chat_id_env: str = "TG_PREPARE_CHAT_ID"
+    entry_chat_id_env: str = "TG_ENTRY_CHAT_ID"
+    fallback_chat_id_env: str = "TG_CHAT_ID"
+    paper_chat_id_env: str = "TG_PAPER_CHAT_ID"
 
 
 class LiberalConfig(BaseModel):
@@ -158,12 +166,11 @@ class LiberalConfig(BaseModel):
 
 class PaperModeConfig(BaseModel):
     enabled: bool = True
-    paper_chat_id_env: str = "TG_PAPER_CHAT_ID"
     liberal: LiberalConfig = Field(default_factory=LiberalConfig)
 
 
 class StrategyFeaturesConfig(BaseModel):
-    """Опциональные правила стратегии — включаются через config.yaml.
+    """Опциональные правила стратегии — включаются через config/setup.yaml.
 
     ``extend_impulse_to_structural_extreme`` и ``completion_retrace`` оставлены
     для обратной совместимости конфигов, но в pivot-стеке не используются
@@ -196,6 +203,7 @@ class BotConfig(BaseModel):
     entry: EntryConfig = Field(default_factory=EntryConfig)
     filters: FiltersConfig
     risk: RiskConfig
+    research: ResearchConfig = Field(default_factory=ResearchConfig)
     telegram: TelegramConfig
     paper_mode: PaperModeConfig
     strategy_features: StrategyFeaturesConfig = Field(default_factory=StrategyFeaturesConfig)
@@ -210,7 +218,9 @@ class EnvConfig(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     tg_bot_token: str = Field(alias="TG_BOT_TOKEN")
-    tg_chat_id: str = Field(alias="TG_CHAT_ID")
+    tg_chat_id: str | None = Field(default=None, alias="TG_CHAT_ID")
+    tg_prepare_chat_id: str | None = Field(default=None, alias="TG_PREPARE_CHAT_ID")
+    tg_entry_chat_id: str | None = Field(default=None, alias="TG_ENTRY_CHAT_ID")
     tg_paper_chat_id: str | None = Field(default=None, alias="TG_PAPER_CHAT_ID")
     bybit_api_key: str | None = Field(default=None, alias="BYBIT_API_KEY")
     bybit_api_secret: str | None = Field(default=None, alias="BYBIT_API_SECRET")
@@ -218,7 +228,60 @@ class EnvConfig(BaseSettings):
     bot_log_level: str = Field(default="INFO", alias="BOT_LOG_LEVEL")
     bot_db_url: str = Field(default="sqlite:///./bot.db", alias="BOT_DB_URL")
 
+    def telegram_chat_id(self, env_name: str) -> str | None:
+        values = {
+            "TG_CHAT_ID": self.tg_chat_id,
+            "TG_PREPARE_CHAT_ID": self.tg_prepare_chat_id,
+            "TG_ENTRY_CHAT_ID": self.tg_entry_chat_id,
+            "TG_PAPER_CHAT_ID": self.tg_paper_chat_id,
+        }
+        return values.get(env_name)
+
+
+CONFIG_FILENAMES: tuple[str, ...] = (
+    "runtime.yaml",
+    "setup.yaml",
+    "entry.yaml",
+    "risk.yaml",
+    "research.yaml",
+    "notifications.yaml",
+)
+
+
+def _deep_merge(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    for key, value in incoming.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def find_bot_config_source(start: Path | None = None) -> Path:
+    cwd = start or Path.cwd()
+    for candidate in (cwd, Path(__file__).resolve().parents[2]):
+        config_dir = candidate / "config"
+        if config_dir.is_dir():
+            return config_dir
+        legacy = candidate / "config.yaml"
+        if legacy.exists():
+            return legacy
+    msg = "Не найден config/ или config.yaml (запускайте из каталога crypto-signal-bot)."
+    raise SystemExit(msg)
+
 
 def load_bot_config(config_path: Path) -> BotConfig:
-    raw: dict[str, Any] = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if config_path.is_dir():
+        raw: dict[str, Any] = {}
+        missing = [name for name in CONFIG_FILENAMES if not (config_path / name).exists()]
+        if missing:
+            msg = f"В {config_path} отсутствуют обязательные конфиги: {', '.join(missing)}"
+            raise ValueError(msg)
+        for filename in CONFIG_FILENAMES:
+            part = yaml.safe_load((config_path / filename).read_text(encoding="utf-8")) or {}
+            if not isinstance(part, dict):
+                raise ValueError(f"{config_path / filename} должен содержать YAML mapping")
+            _deep_merge(raw, part)
+    else:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     return BotConfig.model_validate(raw)

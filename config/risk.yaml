@@ -1,0 +1,3 @@
+risk:
+  sl_buffer_atr: 0.5
+  tp_r_multiples: [2, 3]

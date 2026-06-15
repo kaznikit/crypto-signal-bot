@@ -1,0 +1,24 @@
+reversal:
+  ttl_bars_4h: 8
+  choch_lookback_bars: 30
+continuation:
+  fib_low: 0.5
+  structure_max_bars_ago: 120
+pivots:
+  swing_size_by_tf:
+    "5M": 20
+    "15M": 12
+    "1H": 4
+    "4H": 7
+  bos_use_close: true
+  impulse_max_age_bars: 120
+filters:
+  min_atr_pct: 0.3
+strategy_features:
+  require_liquidity_grab_reversal: false
+  quality_score_enabled: true
+  min_quality_score: 20
+  volume_expansion_in_score: true
+  continuation_require_4h_alignment: false
+  require_ob_or_fvg_in_ote: false
+  swing_length_ob_fvg: 10

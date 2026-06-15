@@ -23,9 +23,23 @@ def build_tv_link(symbol: str, tf: str, exchange: str = "BYBIT") -> str:
 
 
 class TelegramNotifier:
-    def __init__(self, bot_token: str, chat_id: str, paper_chat_id: str | None = None) -> None:
+    def __init__(
+        self,
+        bot_token: str,
+        chat_id: str | None = None,
+        prepare_chat_id: str | None = None,
+        entry_chat_id: str | None = None,
+        paper_chat_id: str | None = None,
+    ) -> None:
         self._bot = Bot(token=bot_token)
-        self._chat_id = chat_id
+        resolved_prepare_chat_id = prepare_chat_id or chat_id
+        resolved_entry_chat_id = entry_chat_id or chat_id
+        if not resolved_prepare_chat_id:
+            raise ValueError("TG_PREPARE_CHAT_ID or TG_CHAT_ID is required")
+        if not resolved_entry_chat_id:
+            raise ValueError("TG_ENTRY_CHAT_ID or TG_CHAT_ID is required")
+        self._prepare_chat_id = resolved_prepare_chat_id
+        self._entry_chat_id = resolved_entry_chat_id
         self._paper_chat_id = paper_chat_id
 
     @staticmethod
@@ -51,10 +65,12 @@ class TelegramNotifier:
                 logger.warning("Liberal-only signal skipped: TG_PAPER_CHAT_ID is not set")
                 return None
             target_chat = self._paper_chat_id
+        elif paper_mode and self._paper_chat_id:
+            target_chat = self._paper_chat_id
+        elif kind == SignalKind.ENTRY:
+            target_chat = self._entry_chat_id
         else:
-            target_chat = (
-                self._paper_chat_id if paper_mode and self._paper_chat_id else self._chat_id
-            )
+            target_chat = self._prepare_chat_id
 
         await self._bot.send_message(
             chat_id=target_chat,
@@ -123,9 +139,11 @@ class TelegramNotifier:
             confirm_note = ""
             if confirm_kind and confirm_level is not None:
                 confirm_note = f" {confirm_kind}@{confirm_level}"
+            strategy = payload.get("entry_strategy")
+            strategy_note = f" strategy={strategy}" if strategy else ""
             return (
                 f"{prefix}{header} {payload.get('type', '')} {symbol} {direction} @ {entry}"
-                f"{extra}{tf_note}{idx_note}{confirm_note}{tv_line}"
+                f"{extra}{tf_note}{idx_note}{confirm_note}{strategy_note}{tv_line}"
             )
         if kind == SignalKind.INVALIDATED:
             return f"{prefix}INVALIDATED {payload.get('type', '')} {symbol}{tv_line}"

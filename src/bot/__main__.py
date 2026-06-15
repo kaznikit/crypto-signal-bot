@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from pathlib import Path
 from typing import Any
 
 from bot.analyzer.continuation import detect_continuation_prepare
@@ -12,15 +11,12 @@ from bot.analyzer.entry_ltf import (
     ltf_expected_for_htf,
     prepare_since_open_ms,
 )
-from bot.analyzer.filters import atr_percent, close_beyond_level, finalize_entry_levels
-from bot.analyzer.reentry import (
-    reentry_has_new_structure_break,
-    reentry_price_improved,
-    reentry_swing_reset_reached,
-)
+from bot.analyzer.filters import atr_percent
 from bot.analyzer.reversal import detect_reversal_prepare
-from bot.analyzer.setup_lifecycle import decide_setup_structure_transition
-from bot.analyzer.setup_lifecycle import apply_reset_after_first_entry_policy
+from bot.analyzer.setup_lifecycle import (
+    apply_reset_after_first_entry_policy,
+    decide_setup_structure_transition,
+)
 from bot.analyzer.setup_machine import tick_setup
 from bot.analyzer.setup_runtime import check_price_invalidation, resolve_ltf_confirmation
 from bot.analyzer.strategy_gates import (
@@ -29,7 +25,8 @@ from bot.analyzer.strategy_gates import (
     evaluate_reversal_prepare_detailed,
     evaluate_reversal_prepare_liberal,
 )
-from bot.config import EnvConfig, load_bot_config
+from bot.config import EnvConfig, find_bot_config_source, load_bot_config
+from bot.entry_engine import EntryEvaluationContext, build_entry_strategy
 from bot.exchange.bybit_client import BybitClient
 from bot.market.candles import candles_to_df
 from bot.market.pivots import extract_structure_breaks_htf
@@ -58,7 +55,7 @@ def _enrich_prepare_payload(
 class SignalBotApp:
     def __init__(self) -> None:
         self._env = EnvConfig()
-        self._cfg = load_bot_config(Path("config.yaml"))
+        self._cfg = load_bot_config(find_bot_config_source())
         setup_logging(self._env.bot_log_level)
         self._repo = Repository(self._env.bot_db_url)
         self._repo.create_schema()
@@ -67,11 +64,19 @@ class SignalBotApp:
             api_key=self._env.bybit_api_key,
             api_secret=self._env.bybit_api_secret,
         )
+        self._paper_chat_id = self._env.telegram_chat_id(
+            self._cfg.telegram.paper_chat_id_env
+        )
         self._notifier = TelegramNotifier(
             bot_token=self._env.tg_bot_token,
-            chat_id=self._env.tg_chat_id,
-            paper_chat_id=self._env.tg_paper_chat_id,
+            chat_id=self._env.telegram_chat_id(self._cfg.telegram.fallback_chat_id_env),
+            prepare_chat_id=self._env.telegram_chat_id(
+                self._cfg.telegram.prepare_chat_id_env
+            ),
+            entry_chat_id=self._env.telegram_chat_id(self._cfg.telegram.entry_chat_id_env),
+            paper_chat_id=self._paper_chat_id,
         )
+        self._entry_strategy = build_entry_strategy(self._cfg.entry.strategy)
         self._scheduler = TimeframeScheduler()
         self._latest_4h_series: dict[str, Any] = {}
 
@@ -294,7 +299,7 @@ class SignalBotApp:
             funnel["reversal_prepare_sent"] += 1
             return
 
-        if liberal_cfg.enabled and self._env.tg_paper_chat_id:
+        if liberal_cfg.enabled and self._paper_chat_id:
             lib_gate = evaluate_reversal_prepare_liberal(
                 df=df,
                 choch_direction=setup.direction,
@@ -405,7 +410,7 @@ class SignalBotApp:
             funnel[f"continuation_{htf.lower()}_prepare_sent"] += 1
             return
 
-        if liberal_cfg.enabled and self._env.tg_paper_chat_id:
+        if liberal_cfg.enabled and self._paper_chat_id:
             lib_gate = evaluate_continuation_prepare_liberal(
                 df_htf=df,
                 setup=setup,
@@ -574,66 +579,37 @@ class SignalBotApp:
             payload["confirm_reset_level"] = choch.reset_level
 
             if event.kind == "ENTRY":
-                payload["entry"] = float(row["close"])
-                if setup.last_entry_bar_ms is not None and int(setup.last_entry_bar_ms) == bar_open_ms:
-                    funnel["entry_skipped_duplicate_bar"] += 1
-                    continue
-                if int(setup.entry_count or 0) >= max_entries_per_setup:
-                    self._repo.mark_setup_state(setup.id, "CONFIRMED", utcnow())
-                    setup.state = "CONFIRMED"
-                    funnel["entry_limit_reached"] += 1
-                    continue
-                payload["entry_index"] = int(setup.entry_count or 0) + 1
-                payload["entries_max"] = max_entries_per_setup
-                if int(setup.entry_count or 0) > 0:
-                    if not reentry_has_new_structure_break(
-                        confirm_broken_open_ms=choch.broken_open_ms,
-                        last_entry_bar_ms=setup.last_entry_bar_ms,
-                    ):
-                        funnel["entry_reentry_wait_new_structure_break"] += 1
-                        continue
-                    if not reentry_swing_reset_reached(
-                        ltf_df=ltf_df,
-                        direction=setup.direction,
-                        last_entry_bar_ms=setup.last_entry_bar_ms,
-                        last_entry_swing_level=setup.last_entry_swing_level,
-                    ):
-                        funnel["entry_reentry_wait_reset_swing"] += 1
-                        continue
-                if self._cfg.entry.require_close_beyond_choch:
-                    level = choch.level if choch else float(row["close"])
-                    if not close_beyond_level(float(row["close"]), level, setup.direction):
-                        funnel["entry_rejected_close_not_beyond_level"] += 1
-                        continue
-
-                entry_price = float(row["close"])
-                if int(setup.entry_count or 0) > 0 and not reentry_price_improved(
-                    direction=setup.direction,
-                    entry_price=entry_price,
-                    last_entry_price=setup.last_entry_price,
-                ):
-                    funnel["entry_reentry_wait_better_price"] += 1
-                    continue
                 min_rr = (
                     liberal_cfg.min_rr
                     if setup.is_liberal and liberal_cfg.enabled
                     else self._cfg.filters.min_rr
                 )
-                levels, reject = finalize_entry_levels(
-                    entry=entry_price,
-                    direction=setup.direction,
-                    invalidation_price=setup.invalidation_price,
-                    compute_sl_tp=self._cfg.entry.compute_sl_tp,
-                    min_rr=min_rr,
+                entry_decision = self._entry_strategy.evaluate(
+                    EntryEvaluationContext(
+                        setup=setup,
+                        confirmation=choch,
+                        ltf_df=ltf_df,
+                        row=row,
+                        entry=self._cfg.entry,
+                        min_rr=min_rr,
+                        max_entries=max_entries_per_setup,
+                    )
                 )
-                if reject == "zero_risk":
-                    funnel["entry_rejected_zero_risk"] += 1
+                if not entry_decision.accepted:
+                    funnel[entry_decision.reason] += 1
+                    if entry_decision.reason == "entry_limit_reached":
+                        self._repo.mark_setup_state(setup.id, "CONFIRMED", utcnow())
+                        setup.state = "CONFIRMED"
                     continue
-                if reject == "rr_below_min":
-                    funnel["entry_rejected_rr_below_min"] += 1
-                    continue
-                if levels is not None:
-                    payload.update(levels)
+
+                assert entry_decision.entry_price is not None
+                entry_price = entry_decision.entry_price
+                payload["entry"] = entry_price
+                payload["entry_strategy"] = self._entry_strategy.name
+                payload["entry_index"] = int(setup.entry_count or 0) + 1
+                payload["entries_max"] = max_entries_per_setup
+                if entry_decision.levels is not None:
+                    payload.update(entry_decision.levels)
                 else:
                     funnel["entry_sent_without_sl_tp"] += 1
                 signal_row = await self._notifier.send_event(

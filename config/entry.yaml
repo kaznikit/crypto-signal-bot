@@ -1,0 +1,28 @@
+entry:
+  strategy: structural
+  ltf_by_htf:
+    "4H": "5M"
+    "1H": "5M"
+    "15M": "5M"
+  invalidation_ltf_by_htf:
+    "4H": "4H"
+    "1H": "1H"
+    "15M": "15M"
+  ltf_swing_length:
+    "5M": 8
+    "15M": 6
+    "1H": 8
+  ltf_swing_use_pivot_sizes: false
+  max_entries_per_setup: 2
+  ltf_max_bars_ago: 24
+  ltf_max_bars_ago_by_tf:
+    "5M": 96
+    "15M": 36
+    "1H": 18
+  compute_sl_tp: false
+  require_close_beyond_choch: false
+  confirm_structure_kinds: [CHOCH, BOS]
+  structure_lookback: since_prepare
+  confirm_mode: structure_break
+filters:
+  min_rr: 1.5

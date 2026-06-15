@@ -21,7 +21,7 @@ from bot.analyzer.entry_ltf import ltf_expected_for_htf
 from bot.analyzer.filters import atr_percent
 from bot.analyzer.reversal import detect_reversal_prepare
 from bot.analyzer.strategy_gates import evaluate_reversal_prepare
-from bot.config import EnvConfig, load_bot_config
+from bot.config import EnvConfig, find_bot_config_source, load_bot_config
 from bot.exchange.bybit_client import BybitClient
 from bot.market.candles import candles_to_df
 from bot.market.pivots import extract_structure_breaks_htf
@@ -30,12 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 def _find_config_path() -> Path:
-    cwd = Path.cwd()
-    for candidate in (cwd / "config.yaml", Path(__file__).resolve().parents[2] / "config.yaml"):
-        if candidate.exists():
-            return candidate
-    msg = "Не найден config.yaml (запускайте из каталога crypto-signal-bot)."
-    raise SystemExit(msg)
+    return find_bot_config_source()
 
 
 def _tv_link(symbol: str, tf: str, exchange: str = "BYBIT") -> str:
@@ -159,7 +154,7 @@ def main() -> None:
         default=None,
         help=(
             "Макс. баров назад для CHoCH "
-            "(по умолчанию reversal.choch_lookback_bars из config.yaml)"
+            "(по умолчанию reversal.choch_lookback_bars из config/setup.yaml)"
         ),
     )
     args = parser.parse_args()

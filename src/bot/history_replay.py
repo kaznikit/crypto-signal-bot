@@ -17,15 +17,12 @@ from bot.analyzer.entry_ltf import (
     ltf_expected_for_htf,
     prepare_since_open_ms,
 )
-from bot.analyzer.filters import atr_percent, close_beyond_level, finalize_entry_levels
-from bot.analyzer.reentry import (
-    reentry_has_new_structure_break,
-    reentry_price_improved,
-    reentry_swing_reset_reached,
-)
+from bot.analyzer.filters import atr_percent
 from bot.analyzer.reversal import detect_reversal_prepare
-from bot.analyzer.setup_lifecycle import decide_setup_structure_transition
-from bot.analyzer.setup_lifecycle import apply_reset_after_first_entry_policy
+from bot.analyzer.setup_lifecycle import (
+    apply_reset_after_first_entry_policy,
+    decide_setup_structure_transition,
+)
 from bot.analyzer.setup_runtime import check_price_invalidation, resolve_ltf_confirmation
 from bot.analyzer.strategy_gates import (
     evaluate_continuation_prepare_detailed,
@@ -33,7 +30,8 @@ from bot.analyzer.strategy_gates import (
     evaluate_reversal_prepare_detailed,
     evaluate_reversal_prepare_liberal,
 )
-from bot.config import EnvConfig, load_bot_config
+from bot.config import EnvConfig, find_bot_config_source, load_bot_config
+from bot.entry_engine import EntryEvaluationContext, build_entry_strategy
 from bot.exchange.bybit_client import BybitClient
 from bot.market.candles import candles_to_df
 from bot.market.fibo import OteZone, is_price_in_zone
@@ -131,12 +129,7 @@ class ReplaySummary:
 
 
 def _find_config_path() -> Path:
-    cwd = Path.cwd()
-    for candidate in (cwd / "config.yaml", Path(__file__).resolve().parents[2] / "config.yaml"):
-        if candidate.exists():
-            return candidate
-    msg = "Не найден config.yaml (запускайте из каталога crypto-signal-bot)."
-    raise SystemExit(msg)
+    return find_bot_config_source()
 
 
 def _load_timeframes(
@@ -185,6 +178,7 @@ def _expanded_limits_by_tf(
     *,
     needed_tfs: tuple[str, ...],
     limit: int,
+    max_expanded_bars_per_tf: int = MAX_EXPANDED_BARS_PER_TF,
 ) -> dict[str, int]:
     """Расширить лимиты младших TF до горизонта старшего TF.
 
@@ -200,7 +194,7 @@ def _expanded_limits_by_tf(
         tf_ms = TF_MS[tf]
         # ceil(limit * max_tf_ms / tf_ms)
         scaled = (limit * max_tf_ms + tf_ms - 1) // tf_ms
-        out[tf] = min(MAX_EXPANDED_BARS_PER_TF, max(limit, int(scaled)))
+        out[tf] = min(max_expanded_bars_per_tf, max(limit, int(scaled)))
     return out
 
 
@@ -956,7 +950,11 @@ async def run_history_replay(
     )
 
     needed_tfs, replay_targets = _load_timeframes(mode, cfg, focus_htf=focus_htf)
-    limit_by_tf = _expanded_limits_by_tf(needed_tfs=needed_tfs, limit=limit)
+    limit_by_tf = _expanded_limits_by_tf(
+        needed_tfs=needed_tfs,
+        limit=limit,
+        max_expanded_bars_per_tf=cfg.research.max_expanded_bars_per_tf,
+    )
 
     tasks = [
         client.fetch_klines(symbol=symbol, timeframe=tf, limit=limit_by_tf[tf])
@@ -984,6 +982,7 @@ async def run_history_replay(
     closed_trades: list[ClosedTrade] = []
     funnel: Counter[str] = Counter()
     continuation_prepare_state = ContinuationPrepareState()
+    entry_strategy = build_entry_strategy(cfg.entry.strategy)
 
     latest_4h_df: Any = None
 
@@ -1417,68 +1416,36 @@ async def run_history_replay(
             if choch is None:
                 continue
             funnel[f"entry_confirm_{choch.kind.lower()}_{used_tf.lower()}"] += 1
-            bar_open_ms = int(row["open_time"])
-            if setup.last_entry_bar_ms is not None and int(setup.last_entry_bar_ms) == bar_open_ms:
-                funnel["entry_skipped_duplicate_bar"] += 1
-                continue
-            if int(setup.entry_count or 0) >= max_entries_per_setup:
-                setup.state = "CONFIRMED"
-                funnel["entry_limit_reached"] += 1
-                continue
-            if int(setup.entry_count or 0) > 0:
-                if not reentry_has_new_structure_break(
-                    confirm_broken_open_ms=choch.broken_open_ms,
-                    last_entry_bar_ms=setup.last_entry_bar_ms,
-                ):
-                    funnel["entry_reentry_wait_new_structure_break"] += 1
-                    continue
-                if not reentry_swing_reset_reached(
-                    ltf_df=ltf_df,
-                    direction=setup.direction,
-                    last_entry_bar_ms=setup.last_entry_bar_ms,
-                    last_entry_swing_level=setup.last_entry_swing_level,
-                ):
-                    funnel["entry_reentry_wait_reset_swing"] += 1
-                    continue
-
-            entry = float(row["close"])
-            if int(setup.entry_count or 0) > 0 and not reentry_price_improved(
-                direction=setup.direction,
-                entry_price=entry,
-                last_entry_price=setup.last_entry_price,
-            ):
-                funnel["entry_reentry_wait_better_price"] += 1
-                continue
-            if cfg.entry.require_close_beyond_choch:
-                level = float(choch.level)
-                if not close_beyond_level(entry, level, setup.direction):
-                    funnel["entry_rejected_close_not_beyond_level"] += 1
-                    continue
-
             min_rr = (
                 cfg.paper_mode.liberal.min_rr
                 if setup.is_liberal and cfg.paper_mode.liberal.enabled
                 else cfg.filters.min_rr
             )
-            levels, reject = finalize_entry_levels(
-                entry=entry,
-                direction=setup.direction,
-                invalidation_price=float(setup.invalidation_price),
-                compute_sl_tp=cfg.entry.compute_sl_tp,
-                min_rr=min_rr,
+            entry_decision = entry_strategy.evaluate(
+                EntryEvaluationContext(
+                    setup=setup,
+                    confirmation=choch,
+                    ltf_df=ltf_df,
+                    row=row,
+                    entry=cfg.entry,
+                    min_rr=min_rr,
+                    max_entries=max_entries_per_setup,
+                )
             )
-            if reject == "zero_risk":
-                funnel["entry_rejected_zero_risk"] += 1
-                continue
-            if reject == "rr_below_min":
-                funnel["entry_rejected_rr_below_min"] += 1
+            if not entry_decision.accepted:
+                funnel[entry_decision.reason] += 1
+                if entry_decision.reason == "entry_limit_reached":
+                    setup.state = "CONFIRMED"
                 continue
 
+            bar_open_ms = int(row["open_time"])
+            assert entry_decision.entry_price is not None
+            entry = entry_decision.entry_price
             sl: float | None = None
             tp: float | None = None
-            if levels is not None:
-                sl = float(levels["sl"])
-                tp = float(levels["tp"])
+            if entry_decision.levels is not None:
+                sl = float(entry_decision.levels["sl"])
+                tp = float(entry_decision.levels["tp"])
                 open_trades.append(
                     OpenTrade(
                         setup_id=setup.id,
@@ -1520,6 +1487,7 @@ async def run_history_replay(
                     "ltf_expected": setup.ltf_expected,
                     "bar_open_ms": bar_open_ms,
                     "entry": entry,
+                    "entry_strategy": entry_strategy.name,
                     "ote_low": setup.ote_low,
                     "ote_high": setup.ote_high,
                     "is_liberal": setup.is_liberal,

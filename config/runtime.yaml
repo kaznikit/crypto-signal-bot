@@ -1,0 +1,22 @@
+exchange:
+  name: bybit
+  category: linear
+symbols:
+  mode: top_by_volume
+  count: 50
+  quote: USDT
+timeframes: [4H, 1H]
+paper_mode:
+  enabled: false
+  liberal:
+    enabled: false
+    min_atr_pct: 0.15
+    min_rr: 1.2
+    min_quality_score: 0
+    fib_low: 0.382
+    fib_high: 0.786
+    max_bars_ago_4h: 50
+    ltf_swing_length_override:
+      "5M": 5
+      "15M": 8
+      "1H": 10
