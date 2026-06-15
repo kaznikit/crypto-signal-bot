@@ -79,8 +79,9 @@ Pine-индикатора `Market Structure` by Leviathan** — пользова
 | Параметр | Назначение |
 |----------|------------|
 | `require_liquidity_grab_reversal` | Для **разворота**: не слать PREPARE, пока не выполнен sweep ликвидности перед CHoCH (`liquidity_grab_filter`). |
-| `quality_score_enabled` | Считать score 0–100 и писать в payload / сообщение; при `false` score не считается, порог не действует. |
-| `min_quality_score` | Минимальный score для PREPARE (только если `quality_score_enabled: true`). |
+| `quality_score_enabled` | Считать score 0–100 и логировать реальные доступные признаки. |
+| `quality_score_filter_enabled` | Применять score как фильтр; по умолчанию выключен до статистического подтверждения весов. |
+| `min_quality_score` | Минимальный score только при включённом `quality_score_filter_enabled`. |
 | `volume_expansion_in_score` | Учитывать в score всплеск объёма относительно SMA. |
 | `continuation_require_4h_alignment` | Для **продолжения** на 1H/15M: последний BOS/CHoCH на **4H** в ту же сторону. Сейчас 4H подтягивается только если в этом же минутном тике закрылся и 4H — иначе `series` не содержит 4H и сетап будет отклонён; для продакшена имеет смысл добавить кэш последней 4H-серии между тиками. |
 | `require_ob_or_fvg_in_ote` | Требовать пересечение OTE-зоны с **OB или FVG** (`smartmoneyconcepts`). Единственное место, где ещё используется `smc` (OB/FVG никак не связаны с импульсной логикой). |
@@ -284,11 +285,31 @@ pytest -q tests
 cd crypto-signal-bot
 source .venv/bin/activate
 python -m bot.history_replay --symbol BTCUSDT --mode both --limit 1000
+
+# Сравнить A/B/C/D/E на одном запрошенном историческом горизонте
+python -m bot.history_replay --symbol BTCUSDT --mode both --limit 1000 --variant all
+
+# Повторить вариант C с другим минимальным RR
+python -m bot.history_replay --symbol BTCUSDT --mode both --variant C --min-rr 2.5
 # точечно как Pine export для 1H, с прогрессом:
 python -m bot.history_replay --symbol HYPEUSDT --mode continuation --limit 1000 --focus-htf 1H --progress
 # или после pip install -e .
 signal-bot-replay --symbol ETHUSDT --mode reversal --limit 1000
 ```
+
+Replay создаёт полноценную позицию только после ENTRY с рыночной целью,
+stop и положительным RR. Варианты:
+
+- `A` — первый свежий CHOCH, один вход и риск `1R`;
+- `B` — первый свежий CHOCH или BOS, один вход и риск `1R`;
+- `C` — CHOCH + подтверждённый re-entry с общим риском `0.6R + 0.4R`;
+- `D` — вариант C с MFI-фильтром; в остальных вариантах MFI только логируется;
+- `E` — слепой Fib DCA как контрольная группа.
+
+Комиссия, проскальзывание, spread и консервативный порядок SL/TP на одной
+свече задаются в `history_replay`. Итоговый отчёт показывает expectancy после
+расходов, MAE/MFE, losing streak, holding time и разрезы по направлению,
+Fib-глубине и рыночному режиму.
 
 `--mode`: `reversal`, `continuation`, `both` (по умолчанию `both`).
 `--max-expanded-bars-per-tf` переопределяет глубину младших TF. Для каскада

@@ -15,14 +15,15 @@ entry:
     "15M": 6
     "1H": 8
   ltf_swing_use_pivot_sizes: false
-  max_entries_per_setup: 1
+  max_entries_per_setup: 2
+  risk_fractions: [0.6, 0.4]
   ltf_max_bars_ago: 24
   ltf_max_bars_ago_by_tf:
     "1M": 120
     "5M": 96
     "15M": 36
     "1H": 18
-  compute_sl_tp: false
+  compute_sl_tp: true
   require_close_beyond_choch: false
   confirm_structure_kinds: [CHOCH, BOS]
   structure_lookback: since_prepare

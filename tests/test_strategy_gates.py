@@ -63,6 +63,7 @@ def test_evaluate_reversal_min_quality_blocks() -> None:
     features = StrategyFeaturesConfig(
         require_liquidity_grab_reversal=False,
         quality_score_enabled=True,
+        quality_score_filter_enabled=True,
         min_quality_score=100,
         require_ob_or_fvg_in_ote=False,
     )
@@ -84,6 +85,7 @@ def test_evaluate_reversal_detailed_reason_for_quality_block() -> None:
     features = StrategyFeaturesConfig(
         require_liquidity_grab_reversal=False,
         quality_score_enabled=True,
+        quality_score_filter_enabled=True,
         min_quality_score=100,
         require_ob_or_fvg_in_ote=False,
     )

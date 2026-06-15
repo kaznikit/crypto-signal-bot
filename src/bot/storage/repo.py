@@ -6,7 +6,7 @@ from datetime import datetime
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from bot.storage.models import Base, BotState, Setup, Signal
+from bot.storage.models import Base, BotState, Setup, Signal, Trade
 from bot.util.time import ensure_utc
 
 
@@ -123,6 +123,110 @@ class Repository:
         with self._session_factory() as session:
             session.merge(signal)
             session.commit()
+
+    def upsert_trade_entry(
+        self,
+        *,
+        setup: Setup,
+        payload: dict[str, object],
+        entry_time: int,
+        at: datetime,
+    ) -> Trade:
+        trade_id = str(setup.id)
+        entry_price = float(payload["entry"])
+        stop_price = float(payload["sl"])
+        tp_price = float(payload["tp"])
+        risk_fraction = float(payload.get("risk_fraction") or 1.0)
+        risk_per_unit = abs(entry_price - stop_price)
+        if risk_per_unit <= 0:
+            raise ValueError("trade entry and stop must define positive risk")
+        size = risk_fraction / risk_per_unit
+        with self._session_factory() as session:
+            row = session.get(Trade, trade_id)
+            entries: list[dict[str, object]] = []
+            if row is not None:
+                entries = list(json.loads(row.entries_json))
+            entries.append(
+                {
+                    "entry_time": int(entry_time),
+                    "entry_price": entry_price,
+                    "position_size": size,
+                    "risk_fraction": risk_fraction,
+                    "entry_type": "first_entry" if len(entries) == 0 else "reentry",
+                }
+            )
+            total_size = sum(float(entry["position_size"]) for entry in entries)
+            average_entry = (
+                sum(
+                    float(entry["entry_price"]) * float(entry["position_size"])
+                    for entry in entries
+                )
+                / total_size
+            )
+            if row is None:
+                row = Trade(
+                    id=trade_id,
+                    setup_id=setup.id,
+                    symbol=setup.symbol,
+                    direction=setup.direction,
+                    setup_type=setup.type,
+                    entry_type=str(entries[-1]["entry_type"]),
+                    status="OPEN",
+                    entry_time=int(entries[0]["entry_time"]),
+                    entry_price=average_entry,
+                    position_size=total_size,
+                    stop_price=stop_price,
+                    tp_price=tp_price,
+                    risk_usd=1.0,
+                    risk_r=sum(float(entry["risk_fraction"]) for entry in entries),
+                    entries_json=json.dumps(entries, ensure_ascii=True),
+                    features_json="{}",
+                    created_at=at,
+                    updated_at=at,
+                )
+            else:
+                row.entry_type = str(entries[-1]["entry_type"])
+                row.entry_price = average_entry
+                row.position_size = total_size
+                row.risk_r = sum(float(entry["risk_fraction"]) for entry in entries)
+                row.entries_json = json.dumps(entries, ensure_ascii=True)
+                row.updated_at = at
+            session.merge(row)
+            session.commit()
+            return row
+
+    def close_trade(
+        self,
+        *,
+        setup_id: str,
+        exit_time: int,
+        exit_price: float,
+        exit_reason: str,
+        at: datetime,
+    ) -> None:
+        with self._session_factory() as session:
+            row = session.get(Trade, setup_id)
+            if row is None or row.status != "OPEN":
+                return
+            sign = 1.0 if row.direction == "LONG" else -1.0
+            pnl = sign * (float(exit_price) - row.entry_price) * row.position_size
+            row.status = "CLOSED"
+            row.exit_time = int(exit_time)
+            row.exit_price = float(exit_price)
+            row.exit_reason = exit_reason
+            row.realized_pnl = pnl - row.fees - row.funding
+            row.realized_r = row.realized_pnl / row.risk_usd if row.risk_usd > 0 else 0.0
+            row.updated_at = at
+            session.merge(row)
+            session.commit()
+
+    def load_trade(self, setup_id: str) -> Trade | None:
+        with self._session_factory() as session:
+            return session.get(Trade, setup_id)
+
+    def load_open_trades(self) -> list[Trade]:
+        with self._session_factory() as session:
+            return list(session.scalars(select(Trade).where(Trade.status == "OPEN")).all())
 
     def load_active_setups(self) -> list[Setup]:
         with self._session_factory() as session:

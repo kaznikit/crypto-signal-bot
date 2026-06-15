@@ -3,6 +3,7 @@ reversal:
   choch_lookback_bars: 30
 continuation:
   fib_low: 0.5
+  fib_high: 0.786
   structure_max_bars_ago: 120
 pivots:
   swing_size_by_tf:
@@ -18,6 +19,7 @@ filters:
 strategy_features:
   require_liquidity_grab_reversal: false
   quality_score_enabled: true
+  quality_score_filter_enabled: false
   min_quality_score: 20
   volume_expansion_in_score: true
   continuation_require_4h_alignment: false

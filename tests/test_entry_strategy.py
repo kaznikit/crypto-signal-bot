@@ -22,6 +22,7 @@ class _Setup:
     last_entry_bar_ms: int | None = None
     last_entry_price: float | None = None
     last_entry_swing_level: float | None = None
+    entry_target_price: float | None = 120.0
 
 
 def _df() -> pd.DataFrame:

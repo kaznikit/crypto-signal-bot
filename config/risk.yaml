@@ -1,3 +1,11 @@
 risk:
   sl_buffer_atr: 0.5
   tp_r_multiples: [2, 3]
+  risk_per_setup_pct: 1.0
+  max_total_open_risk_pct: 3.0
+  max_same_direction_risk_pct: 2.0
+  max_correlated_risk_pct: 2.0
+  max_positions: 3
+  correlation_groups: {}
+  block_long_on_btc_bearish: true
+  block_short_on_btc_bullish: true

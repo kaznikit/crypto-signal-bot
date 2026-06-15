@@ -3,8 +3,9 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 
-from bot.analyzer.structure_state import resolve_prepare_structure_state
 from bot.analyzer.setup_machine import SetupEvent, build_setup, make_setup_id
+from bot.analyzer.structure_state import resolve_prepare_structure_state
+from bot.market.fibo import build_ote_zone
 from bot.market.pivots import (
     continuation_anchor_break,
     detect_pivots,
@@ -41,6 +42,7 @@ def detect_continuation_prepare(
     close_time: int,
     swing_size: int,
     fib_level: float = 0.5,
+    fib_zone_high: float = 0.786,
     impulse_max_age_bars: int = 60,
     bos_use_close: bool = True,
     ttl_hours: int = 24,
@@ -197,6 +199,7 @@ def detect_continuation_prepare(
     start_open_ms = int(htf_df.iloc[state.impulse.start_idx]["open_time"])
     end_open_ms = int(htf_df.iloc[state.impulse.end_idx]["open_time"])
     touch_open_ms = int(htf_df.iloc[state.touch_idx]["open_time"])
+    ote_zone = build_ote_zone(state.impulse, fib_level, fib_zone_high)
     setup = build_setup(
         setup_id=setup_id,
         symbol=symbol,
@@ -205,8 +208,8 @@ def detect_continuation_prepare(
         htf=htf,
         ltf_expected=ltf_expected,
         origin_price=state.level_50,
-        ote_low=state.level_50,
-        ote_high=state.level_50,
+        ote_low=ote_zone.low,
+        ote_high=ote_zone.high,
         invalidation_price=state.impulse.start_price,
         ttl_hours=ttl_hours,
         phase="WAIT_CHOCH",
@@ -223,10 +226,17 @@ def detect_continuation_prepare(
             "direction": state.direction,
             "htf": htf,
             "origin_price": state.level_50,
-            "ote_low": state.level_50,
-            "ote_high": state.level_50,
+            "ote_low": ote_zone.low,
+            "ote_high": ote_zone.high,
             "prepare_trigger_level": state.level_50,
             "prepare_trigger_fib": float(fib_level),
+            "fib_zone_low": float(fib_level),
+            "fib_zone_high": float(fib_zone_high),
+            "touched_0_5": True,
+            "touched_0_618": False,
+            "touched_0_705": False,
+            "touched_0_786": False,
+            "max_fib_depth": float(fib_level),
             "impulse_start_price": state.impulse.start_price,
             "impulse_end_price": state.impulse.end_price,
             "invalidation_price": state.impulse.start_price,

@@ -85,11 +85,20 @@ def evaluate_reversal_prepare_detailed(
     score = quality_score(
         has_liquidity_grab=has_liq,
         has_volume_expansion=has_vol,
-        rr=1.8,
-        htf_alignment=True,
+        rr=None,
+        htf_alignment=None,
         in_ob_or_fvg=overlap,
     )
-    if score < features.min_quality_score:
+    event.payload.update(
+        {
+            "has_liquidity_grab": has_liq,
+            "has_volume_expansion": has_vol,
+            "htf_alignment": None,
+            "in_ob_or_fvg": overlap,
+            "quality_score": score,
+        }
+    )
+    if features.quality_score_filter_enabled and score < features.min_quality_score:
         return GateResult(ok=False, score=score, reason="reversal_quality_score_below_threshold")
     return GateResult(ok=True, score=score, reason="passed")
 
@@ -120,12 +129,12 @@ def evaluate_continuation_prepare_detailed(
 ) -> GateResult:
     direction = str(event.payload.get("direction", setup.direction))
 
-    htf_alignment = True
+    htf_alignment: bool | None = None
     if features.continuation_require_4h_alignment:
         if df_4h is None:
             return GateResult(ok=False, score=0, reason="continuation_4h_missing")
         htf_alignment = continuation_htf_aligned_with_4h(df_4h, direction)
-        if not htf_alignment:
+        if htf_alignment is not True:
             return GateResult(ok=False, score=0, reason="continuation_4h_misaligned")
 
     ote_low = float(event.payload["ote_low"])
@@ -152,11 +161,20 @@ def evaluate_continuation_prepare_detailed(
     score = quality_score(
         has_liquidity_grab=has_liq,
         has_volume_expansion=has_vol,
-        rr=1.8,
+        rr=None,
         htf_alignment=htf_alignment,
         in_ob_or_fvg=overlap,
     )
-    if score < features.min_quality_score:
+    event.payload.update(
+        {
+            "has_liquidity_grab": has_liq,
+            "has_volume_expansion": has_vol,
+            "htf_alignment": htf_alignment,
+            "in_ob_or_fvg": overlap,
+            "quality_score": score,
+        }
+    )
+    if features.quality_score_filter_enabled and score < features.min_quality_score:
         return GateResult(
             ok=False,
             score=score,

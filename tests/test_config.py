@@ -55,7 +55,12 @@ def test_split_config_matches_current_runtime_settings() -> None:
     assert cfg.entry.mode == "simple"
     assert cfg.entry.active_modes() == ("simple", "sweep_reclaim", "advanced")
     assert cfg.entry.comparison_enabled() is True
+    assert cfg.entry.compute_sl_tp is True
+    assert cfg.entry.max_entries_per_setup == 2
+    assert cfg.entry.risk_fractions == [0.6, 0.4]
     assert cfg.history_replay.max_expanded_bars_per_tf == 60_000
+    assert cfg.history_replay.intrabar_policy == "conservative"
+    assert cfg.strategy_features.quality_score_filter_enabled is False
     assert cfg.telegram.prepare_chat_id_env == "TG_PREPARE_CHAT_ID"
     assert cfg.telegram.entry_chat_id_env == "TG_ENTRY_CHAT_ID"
     assert cfg.telegram.route_paper_mode_to_paper_chat is False

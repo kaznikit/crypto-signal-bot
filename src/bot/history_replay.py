@@ -5,7 +5,7 @@ import asyncio
 import logging
 import os
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import mean, median
 from typing import Any
@@ -67,6 +67,7 @@ from bot.market.pivots import (
     impulse_invalidated,
     pivot_label_for_htf_display,
 )
+from bot.trading import Position, TradeResult
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,10 @@ class ReplaySetup:
     fib_dca_average_entry: float | None = None
     fib_dca_filled_weight_pct: float = 0.0
     fib_dca_last_fill_ms: int | None = None
+    impulse_start_price: float | None = None
+    impulse_end_price: float | None = None
+    touched_fibs: set[float] = field(default_factory=lambda: {0.5})
+    max_fib_depth: float | None = 0.5
 
 
 @dataclass(slots=True)
@@ -148,6 +153,8 @@ class FibOpenPosition:
     filled_fibs: set[float]
     sl: float
     tp: float
+    mae_r: float = 0.0
+    mfe_r: float = 0.0
 
 
 @dataclass(slots=True)
@@ -163,6 +170,56 @@ class ClosedTrade:
     exit: float
     r_multiple: float
     exit_reason: str
+    entry_type: str = "first_entry"
+    stop_price: float = 0.0
+    tp_price: float = 0.0
+    position_size: float = 0.0
+    risk_usd: float = 1.0
+    realized_pnl: float = 0.0
+    gross_r: float = 0.0
+    fees: float = 0.0
+    slippage: float = 0.0
+    funding: float = 0.0
+    mae_r: float = 0.0
+    mfe_r: float = 0.0
+    fib_depth: float | None = None
+    bos_or_choch_type: str | None = None
+    market_regime: str | None = None
+    btc_context: str | None = None
+    features: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_result(cls, result: TradeResult) -> ClosedTrade:
+        return cls(
+            setup_id=result.setup_id,
+            symbol=result.symbol,
+            setup_type=result.setup_type,
+            direction=result.direction,
+            tf=result.tf,
+            entry_time=result.entry_time,
+            exit_time=result.exit_time,
+            entry=result.entry_price,
+            exit=result.exit_price,
+            r_multiple=result.realized_r,
+            exit_reason=result.exit_reason,
+            entry_type=result.entry_type,
+            stop_price=result.stop_price,
+            tp_price=result.tp_price,
+            position_size=result.position_size,
+            risk_usd=result.risk_usd,
+            realized_pnl=result.realized_pnl,
+            gross_r=result.gross_r,
+            fees=result.fees,
+            slippage=result.slippage,
+            funding=result.funding,
+            mae_r=result.mae_r,
+            mfe_r=result.mfe_r,
+            fib_depth=result.fib_depth,
+            bos_or_choch_type=result.bos_or_choch_type,
+            market_regime=result.market_regime,
+            btc_context=result.btc_context,
+            features=result.features,
+        )
 
 
 @dataclass(slots=True)
@@ -179,6 +236,47 @@ class ReplaySummary:
     total_r: float
     max_drawdown_r: float
     profit_factor: float
+    expectancy_r: float = 0.0
+    longest_losing_streak: int = 0
+    avg_mae_r: float = 0.0
+    avg_mfe_r: float = 0.0
+    avg_holding_time_ms: float = 0.0
+    fees_total: float = 0.0
+    slippage_total: float = 0.0
+    funding_total: float = 0.0
+
+
+@dataclass(slots=True)
+class ReplayReport:
+    summary: ReplaySummary
+    closed_trades: list[ClosedTrade]
+    funnel: Counter[str]
+
+
+def _apply_replay_variant(cfg: Any, variant: str) -> None:
+    selected = variant.upper()
+    if selected == "CONFIGURED":
+        return
+    cfg.entry.comparison_modes = []
+    cfg.entry.cascade_enabled = False
+    cfg.entry.mode = "simple"
+    cfg.history_replay.mfi_filter_enabled = False
+    if selected == "A":
+        cfg.entry.confirm_structure_kinds = ["CHOCH"]
+        cfg.entry.max_entries_per_setup = 1
+    elif selected == "B":
+        cfg.entry.confirm_structure_kinds = ["CHOCH", "BOS"]
+        cfg.entry.max_entries_per_setup = 1
+    elif selected in {"C", "D"}:
+        cfg.entry.confirm_structure_kinds = ["CHOCH"]
+        cfg.entry.max_entries_per_setup = 2
+        cfg.entry.risk_fractions = [0.6, 0.4]
+        cfg.history_replay.mfi_filter_enabled = selected == "D"
+    elif selected == "E":
+        cfg.entry.mode = "fib_dca"
+        cfg.entry.max_entries_per_setup = 1
+    else:
+        raise ValueError(f"unknown replay variant: {variant}")
 
 
 def _find_config_path() -> Path:
@@ -973,7 +1071,7 @@ def _resolve_trade_exit(
 
 
 def _has_open_position(
-    open_trades: list[OpenTrade],
+    open_trades: list[OpenTrade | Position],
     fib_positions: dict[str, FibOpenPosition],
     *,
     setup_id: str | None = None,
@@ -1014,6 +1112,136 @@ def _append_invalidated_event(
     )
 
 
+def _entry_risk_fraction(entry_index: int, max_entries: int, configured: list[float]) -> float:
+    if max_entries <= 1:
+        return 1.0
+    index = max(0, entry_index - 1)
+    if index < len(configured):
+        return float(configured[index])
+    return max(0.0, 1.0 - sum(float(value) for value in configured[:index]))
+
+
+def _update_setup_fib_depth(
+    setup: ReplaySetup,
+    *,
+    low: float,
+    high: float,
+    fib_levels: list[float],
+) -> None:
+    if setup.impulse_start_price is None or setup.impulse_end_price is None:
+        return
+    distance = abs(setup.impulse_end_price - setup.impulse_start_price)
+    for fib in fib_levels:
+        level = (
+            setup.impulse_end_price - distance * fib
+            if setup.direction == "LONG"
+            else setup.impulse_end_price + distance * fib
+        )
+        if (setup.direction == "LONG" and low <= level) or (
+            setup.direction == "SHORT" and high >= level
+        ):
+            setup.touched_fibs.add(float(fib))
+    setup.max_fib_depth = max(setup.touched_fibs) if setup.touched_fibs else None
+
+
+def _mfi_features(df: Any, period: int = 14) -> dict[str, Any]:
+    if df is None or len(df) < period + 2:
+        return {
+            "mfi_value": None,
+            "mfi_slope": None,
+            "mfi_was_oversold": False,
+            "mfi_was_overbought": False,
+            "mfi_exit_from_oversold": False,
+            "mfi_exit_from_overbought": False,
+            "mfi_bullish_divergence": False,
+            "mfi_bearish_divergence": False,
+        }
+    work = df.tail(period + 6).copy()
+    typical = (work["high"] + work["low"] + work["close"]) / 3.0
+    flow = typical * work["volume"]
+    delta = typical.diff()
+    positive = flow.where(delta > 0, 0.0)
+    negative = flow.where(delta < 0, 0.0).abs()
+    positive_sum = positive.rolling(period).sum()
+    negative_sum = negative.rolling(period).sum()
+    ratio = positive_sum / negative_sum.replace(0, float("nan"))
+    mfi = (100.0 - (100.0 / (1.0 + ratio))).fillna(50.0)
+    current = float(mfi.iloc[-1])
+    previous = float(mfi.iloc[-2])
+    recent = mfi.tail(6)
+    closes = work["close"].tail(6)
+    return {
+        "mfi_value": current,
+        "mfi_slope": current - previous,
+        "mfi_was_oversold": bool((recent.iloc[:-1] < 20.0).any()),
+        "mfi_was_overbought": bool((recent.iloc[:-1] > 80.0).any()),
+        "mfi_exit_from_oversold": previous <= 20.0 < current,
+        "mfi_exit_from_overbought": previous >= 80.0 > current,
+        "mfi_bullish_divergence": float(closes.iloc[-1]) < float(closes.iloc[0])
+        and current > float(recent.iloc[0]),
+        "mfi_bearish_divergence": float(closes.iloc[-1]) > float(closes.iloc[0])
+        and current < float(recent.iloc[0]),
+    }
+
+
+def _market_regime(df: Any) -> str:
+    if df is None or len(df) < 20:
+        return "unknown"
+    close = df["close"].tail(20)
+    start = float(close.iloc[0])
+    end = float(close.iloc[-1])
+    if start == 0:
+        return "unknown"
+    change = (end - start) / abs(start)
+    if change >= 0.02:
+        return "uptrend"
+    if change <= -0.02:
+        return "downtrend"
+    return "range"
+
+
+def _volatility_regime(df: Any) -> str:
+    if df is None or len(df) < 20:
+        return "unknown"
+    tail = df.tail(20)
+    range_pct = ((tail["high"] - tail["low"]).abs() / tail["close"].abs()).mean()
+    return "high_volatility" if float(range_pct) >= 0.02 else "low_volatility"
+
+
+def _longest_losing_streak(closed_trades: list[ClosedTrade]) -> int:
+    longest = 0
+    current = 0
+    for trade in sorted(closed_trades, key=lambda item: item.exit_time):
+        if trade.r_multiple < 0:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
+def _fib_position_costs(
+    position: FibOpenPosition,
+    *,
+    exit_price: float,
+    fee_rate: float,
+    slippage_rate: float,
+    spread_rate: float,
+    funding_rate: float,
+    exit_time: int,
+) -> tuple[float, float, float]:
+    filled = [level for level in position.plan if level.fib in position.filled_fibs]
+    entry_notional = sum((level.weight_pct / 100.0) * level.price for level in filled)
+    exit_notional = sum((level.weight_pct / 100.0) * float(exit_price) for level in filled)
+    fees = (entry_notional + exit_notional) * max(fee_rate, 0.0)
+    slippage = (entry_notional + exit_notional) * (
+        max(slippage_rate, 0.0) + max(spread_rate, 0.0) / 2.0
+    )
+    funding_intervals = max(0.0, (int(exit_time) - position.entry_time) / (8 * 60 * 60 * 1000))
+    funding = entry_notional * max(funding_rate, 0.0) * funding_intervals
+    return fees, slippage, funding
+
+
 def _max_drawdown_r(closed_trades: list[ClosedTrade]) -> float:
     if not closed_trades:
         return 0.0
@@ -1046,6 +1274,7 @@ def _summarize(symbol: str, mode: str, closed_trades: list[ClosedTrade]) -> Repl
             total_r=0.0,
             max_drawdown_r=0.0,
             profit_factor=0.0,
+            expectancy_r=0.0,
         )
 
     rs = [t.r_multiple for t in closed_trades]
@@ -1071,6 +1300,16 @@ def _summarize(symbol: str, mode: str, closed_trades: list[ClosedTrade]) -> Repl
         total_r=sum(rs),
         max_drawdown_r=_max_drawdown_r(closed_trades),
         profit_factor=profit_factor,
+        expectancy_r=mean(rs),
+        longest_losing_streak=_longest_losing_streak(closed_trades),
+        avg_mae_r=mean(trade.mae_r for trade in closed_trades),
+        avg_mfe_r=mean(trade.mfe_r for trade in closed_trades),
+        avg_holding_time_ms=mean(
+            trade.exit_time - trade.entry_time for trade in closed_trades
+        ),
+        fees_total=sum(trade.fees for trade in closed_trades),
+        slippage_total=sum(trade.slippage for trade in closed_trades),
+        funding_total=sum(trade.funding for trade in closed_trades),
     )
 
 
@@ -1095,19 +1334,37 @@ def _print_report(
             pf=("inf" if summary.profit_factor == float("inf") else f"{summary.profit_factor:.3f}"),
         )
     )
+    print(
+        f"EV={summary.expectancy_r:.3f}R | "
+        f"losing_streak={summary.longest_losing_streak} | "
+        f"avgMAE={summary.avg_mae_r:.3f}R | avgMFE={summary.avg_mfe_r:.3f}R | "
+        f"fees={summary.fees_total:.4f} | slippage={summary.slippage_total:.4f}"
+    )
 
     if closed_trades:
-        by_type: dict[str, list[ClosedTrade]] = {}
-        for tr in closed_trades:
-            by_type.setdefault(tr.setup_type, []).append(tr)
-        print("\nBy setup type:")
-        for setup_type, rows in sorted(by_type.items()):
-            rs = [r.r_multiple for r in rows]
-            wins = sum(1 for r in rs if r > 0)
-            print(
-                f"  {setup_type}: trades={len(rows)} winrate={(wins / len(rows)) * 100:.2f}% "
-                f"avgR={mean(rs):.3f} totalR={sum(rs):.3f}"
-            )
+        groups = (
+            ("setup type", lambda trade: trade.setup_type),
+            ("direction", lambda trade: trade.direction),
+            ("fib depth", lambda trade: str(trade.fib_depth or "unknown")),
+            ("market regime", lambda trade: str(trade.market_regime or "unknown")),
+            (
+                "volatility regime",
+                lambda trade: str(trade.features.get("volatility_regime") or "unknown"),
+            ),
+            ("BTC context", lambda trade: str(trade.btc_context or "unknown")),
+        )
+        for title, key_fn in groups:
+            grouped: dict[str, list[ClosedTrade]] = {}
+            for trade in closed_trades:
+                grouped.setdefault(key_fn(trade), []).append(trade)
+            print(f"\nBy {title}:")
+            for key, rows in sorted(grouped.items()):
+                rs = [row.r_multiple for row in rows]
+                wins = sum(1 for value in rs if value > 0)
+                print(
+                    f"  {key}: trades={len(rows)} winrate={(wins / len(rows)) * 100:.2f}% "
+                    f"avgR={mean(rs):.3f} totalR={sum(rs):.3f}"
+                )
 
     print("\nTop funnel reasons:")
     for key, val in funnel.most_common(top_reasons):
@@ -1127,10 +1384,16 @@ async def run_history_replay(
     progress: bool = False,
     overlay_tfs: set[str] | None = None,
     max_expanded_bars_per_tf: int | None = None,
-) -> None:
+    variant: str = "configured",
+    min_rr: float | None = None,
+    history_cache: dict[tuple[str, str, int], list[Any]] | None = None,
+) -> ReplayReport:
     if not quiet:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
     cfg = load_bot_config(config_path)
+    _apply_replay_variant(cfg, variant)
+    if min_rr is not None:
+        cfg.filters.min_rr = float(min_rr)
     max_entries_per_setup = max(1, int(cfg.entry.max_entries_per_setup))
     env = EnvConfig()
     client = BybitClient(
@@ -1158,15 +1421,21 @@ async def run_history_replay(
         tf_limits = ", ".join(f"{tf}:{limit_by_tf[tf]}" for tf in needed_tfs)
         print(f"Loading Bybit history for {symbol}: {tf_limits}", flush=True)
 
-    tasks = [
-        client.fetch_klines(
+    async def fetch_replay_klines(tf: str) -> list[Any]:
+        key = (symbol, tf, limit_by_tf[tf])
+        if history_cache is not None and key in history_cache:
+            return history_cache[key]
+        candles = await client.fetch_klines(
             symbol=symbol,
             timeframe=tf,
             limit=limit_by_tf[tf],
             progress=_print_fetch_progress if progress else None,
         )
-        for tf in needed_tfs
-    ]
+        if history_cache is not None:
+            history_cache[key] = candles
+        return candles
+
+    tasks = [fetch_replay_klines(tf) for tf in needed_tfs]
     try:
         candles_by_tf = await asyncio.gather(*tasks)
     except Exception as exc:
@@ -1195,7 +1464,7 @@ async def run_history_replay(
     last_idx = {tf: -1 for tf in dfs}
 
     setups: list[ReplaySetup] = []
-    open_trades: list[OpenTrade] = []
+    open_trades: list[Position] = []
     fib_positions: dict[str, FibOpenPosition] = {}
     closed_trades: list[ClosedTrade] = []
     funnel: Counter[str] = Counter()
@@ -1363,6 +1632,8 @@ async def run_history_replay(
                                 fib_dca_average_entry=setup_obj.fib_dca_average_entry,
                                 fib_dca_filled_weight_pct=setup_obj.fib_dca_filled_weight_pct,
                                 fib_dca_last_fill_ms=setup_obj.fib_dca_last_fill_ms,
+                                impulse_start_price=float(event.payload["impulse_start_price"]),
+                                impulse_end_price=float(event.payload["impulse_end_price"]),
                             )
                         )
                         funnel["reversal_prepare_created"] += 1
@@ -1421,6 +1692,7 @@ async def run_history_replay(
                     swing_size=_swing_size_for_htf(cfg, htf),
                     structure_max_bars_ago=cfg.continuation.structure_max_bars_ago,
                     fib_level=cfg.continuation.fib_low,
+                    fib_zone_high=cfg.continuation.fib_high,
                     impulse_max_age_bars=cfg.pivots.impulse_max_age_bars,
                     bos_use_close=cfg.pivots.bos_use_close,
                     ttl_hours=24,
@@ -1511,6 +1783,8 @@ async def run_history_replay(
                         fib_dca_average_entry=setup_obj.fib_dca_average_entry,
                         fib_dca_filled_weight_pct=setup_obj.fib_dca_filled_weight_pct,
                         fib_dca_last_fill_ms=setup_obj.fib_dca_last_fill_ms,
+                        impulse_start_price=float(event.payload["impulse_start_price"]),
+                        impulse_end_price=float(event.payload["impulse_end_price"]),
                     )
                 )
                 funnel[f"continuation_{htf.lower()}_prepare_created"] += 1
@@ -1755,7 +2029,7 @@ async def run_history_replay(
                 continue
 
             lib = cfg.paper_mode.liberal
-            if _has_open_position(open_trades, fib_positions):
+            if _has_open_position(open_trades, fib_positions, setup_id=setup.id):
                 funnel["entry_skipped_open_position"] += 1
                 continue
             ltf_result = resolve_ltf_confirmation(
@@ -1783,6 +2057,12 @@ async def run_history_replay(
                 continue
             low = float(row["low"])
             high = float(row["high"])
+            _update_setup_fib_depth(
+                setup,
+                low=low,
+                high=high,
+                fib_levels=list(cfg.history_replay.fib_levels),
+            )
 
             phase = setup.phase
             if phase == "WAIT_OTE":
@@ -1858,36 +2138,55 @@ async def run_history_replay(
                 if not close_beyond_level(entry, level, setup.direction):
                     funnel["entry_rejected_close_not_beyond_level"] += 1
                     continue
+            entry_features = _mfi_features(ltf_df)
+            if cfg.history_replay.mfi_filter_enabled:
+                mfi_ok = (
+                    bool(entry_features["mfi_exit_from_oversold"])
+                    or bool(entry_features["mfi_bullish_divergence"])
+                    if setup.direction == "LONG"
+                    else bool(entry_features["mfi_exit_from_overbought"])
+                    or bool(entry_features["mfi_bearish_divergence"])
+                )
+                if not mfi_ok:
+                    funnel["entry_rejected_mfi_filter"] += 1
+                    continue
 
             min_rr = (
                 cfg.paper_mode.liberal.min_rr
                 if setup.is_liberal and cfg.paper_mode.liberal.enabled
                 else cfg.filters.min_rr
             )
-            if ltf_result.recommended_stop is not None and ltf_result.target_price is not None:
-                levels = (
-                    {
-                        "sl": recommended_stop,
-                        "tp": float(ltf_result.target_price),
-                        "tp1": float(ltf_result.target_price),
-                    }
-                    if cfg.entry.compute_sl_tp
-                    else None
-                )
-                reject = None
-            else:
-                levels, reject = finalize_entry_levels(
-                    entry=entry,
-                    direction=setup.direction,
-                    invalidation_price=float(setup.invalidation_price),
-                    compute_sl_tp=cfg.entry.compute_sl_tp,
-                    min_rr=min_rr,
-                )
+            existing_position = next(
+                (position for position in open_trades if position.setup_id == setup.id),
+                None,
+            )
+            raw_target = (
+                existing_position.tp_price
+                if existing_position is not None
+                else (ltf_result.target_price or setup.entry_target_price)
+            )
+            target_price = None if raw_target is None else float(raw_target)
+            shared_stop = float(
+                existing_position.stop_price
+                if existing_position is not None
+                else recommended_stop
+            )
+            levels, reject = finalize_entry_levels(
+                entry=entry,
+                direction=setup.direction,
+                invalidation_price=shared_stop,
+                target_price=target_price,
+                compute_sl_tp=cfg.entry.compute_sl_tp,
+                min_rr=min_rr,
+            )
             if reject == "zero_risk":
                 funnel["entry_rejected_zero_risk"] += 1
                 continue
             if reject == "rr_below_min":
                 funnel["entry_rejected_rr_below_min"] += 1
+                continue
+            if reject in {"missing_target", "target_wrong_side"}:
+                funnel[f"entry_rejected_{reject}"] += 1
                 continue
 
             sl: float | None = None
@@ -1895,30 +2194,75 @@ async def run_history_replay(
             if levels is not None:
                 sl = float(levels["sl"])
                 tp = float(levels["tp"])
-            trade_sl = sl if sl is not None else recommended_stop
-            trade_tp = (
-                tp
-                if tp is not None
-                else float(ltf_result.target_price or setup.entry_target_price)
+            trade_sl = sl if sl is not None else shared_stop
+            if tp is None and target_price is None:
+                funnel["entry_rejected_missing_target"] += 1
+                continue
+            trade_tp = tp if tp is not None else float(target_price)
+            risk_distance = abs(entry - trade_sl)
+            if risk_distance <= 0:
+                funnel["entry_opened_signal_only"] += 1
+                continue
+            entry_features.update(
+                {
+                    "fib_depth": setup.max_fib_depth,
+                    "rr": abs(trade_tp - entry) / risk_distance,
+                    "htf_alignment": None,
+                    "sweep_exists": str(choch.kind) in {"RECLAIM", "CHOCH"},
+                    "bos_or_choch_type": str(choch.kind),
+                    "distance_to_target": abs(trade_tp - entry),
+                    "distance_to_sl": abs(entry - trade_sl),
+                    "atr_pct": atr_percent(ltf_df),
+                    "volume": float(row["volume"]),
+                    "btc_context": "self" if symbol.upper().startswith("BTC") else "unknown",
+                    "market_regime": _market_regime(series.get(setup.htf)),
+                    "volatility_regime": _volatility_regime(series.get(setup.htf)),
+                }
             )
-            if abs(entry - trade_sl) > 0:
-                open_trades.append(
-                    OpenTrade(
+            if risk_distance > 0:
+                entry_index = int(setup.entry_count or 0) + 1
+                risk_fraction = _entry_risk_fraction(
+                    entry_index,
+                    max_entries_per_setup,
+                    list(cfg.entry.risk_fractions),
+                )
+                if existing_position is None:
+                    existing_position = Position(
                         setup_id=setup.id,
                         symbol=symbol,
                         setup_type=setup.setup_type,
                         direction=setup.direction,
                         tf=used_tf,
-                        entry_time=bar_open_ms,
-                        entry=entry,
-                        sl=trade_sl,
-                        tp=trade_tp,
-                        risk=abs(entry - trade_sl),
+                        stop_price=trade_sl,
+                        tp_price=trade_tp,
+                        risk_usd=1.0,
+                        fee_rate=float(cfg.history_replay.fee_rate),
+                        slippage_rate=float(cfg.history_replay.slippage_rate),
+                        spread_rate=float(cfg.history_replay.spread_rate),
+                        funding_rate=float(cfg.history_replay.funding_rate),
+                        fib_depth=setup.max_fib_depth,
+                        bos_or_choch_type=str(choch.kind),
+                        market_regime=_market_regime(series.get(setup.htf)),
+                        btc_context="self" if symbol.upper().startswith("BTC") else "unknown",
+                        features=entry_features,
                     )
-                )
-                funnel["entry_opened"] += 1
-            else:
-                funnel["entry_opened_signal_only"] += 1
+                    open_trades.append(existing_position)
+                else:
+                    existing_position.fib_depth = setup.max_fib_depth
+                    existing_position.bos_or_choch_type = str(choch.kind)
+                try:
+                    existing_position.add_entry(
+                        entry_type="first_entry" if entry_index == 1 else "reentry",
+                        entry_time=bar_open_ms,
+                        entry_price=entry,
+                        risk_fraction=risk_fraction,
+                    )
+                except ValueError:
+                    funnel["entry_rejected_shared_risk_above_1r"] += 1
+                    if not existing_position.entries:
+                        open_trades.remove(existing_position)
+                    continue
+                funnel["entry_opened" if entry_index == 1 else "reentry_opened"] += 1
 
             setup.entry_count = int(setup.entry_count or 0) + 1
             setup.last_entry_bar_ms = bar_open_ms
@@ -1956,6 +2300,10 @@ async def run_history_replay(
                     "confirm_reset_level": choch.reset_level,
                     "entry_mode": str(getattr(setup, "entry_mode", "simple")),
                     "recommended_stop": recommended_stop,
+                    "risk_fraction": risk_fraction,
+                    "total_allocated_risk": existing_position.allocated_risk_fraction,
+                    "max_fib_depth": setup.max_fib_depth,
+                    "touched_fibs": sorted(setup.touched_fibs),
                     "recommended_stop_source": (
                         str(ltf_result.recommended_stop_source or "advanced")
                         if ltf_result.recommended_stop is not None
@@ -1972,55 +2320,53 @@ async def run_history_replay(
                     ev["sl"] = sl
                     ev["tp"] = tp
                     ev["tp1"] = tp
+                    ev["rr"] = abs(tp - entry) / abs(entry - sl)
+                ev.update(existing_position.features)
                 events_out.append(ev)
 
-        still_open: list[OpenTrade] = []
-        for trade in open_trades:
-            if trade.tf not in closed_now:
-                still_open.append(trade)
+        still_open: list[Position] = []
+        for position in open_trades:
+            if position.tf not in closed_now:
+                still_open.append(position)
                 continue
-            tf_df = series.get(trade.tf)
+            tf_df = series.get(position.tf)
             if tf_df is None or tf_df.empty:
-                still_open.append(trade)
+                still_open.append(position)
                 continue
 
             row = tf_df.iloc[-1]
             high = float(row["high"])
             low = float(row["low"])
-            hit, exit_price, r_mult, reason = _resolve_trade_exit(trade=trade, high=high, low=low)
-            if not hit:
-                still_open.append(trade)
-                continue
-
-            closed_trades.append(
-                ClosedTrade(
-                    setup_id=trade.setup_id,
-                    symbol=trade.symbol,
-                    setup_type=trade.setup_type,
-                    direction=trade.direction,
-                    tf=trade.tf,
-                    entry_time=trade.entry_time,
-                    exit_time=int(row["open_time"]),
-                    entry=trade.entry,
-                    exit=exit_price,
-                    r_multiple=r_mult,
-                    exit_reason=reason,
-                )
+            position.update_excursions(high=high, low=low)
+            resolved = position.resolve_exit(
+                high=high,
+                low=low,
+                intrabar_policy=str(cfg.history_replay.intrabar_policy),
             )
+            if resolved is None:
+                still_open.append(position)
+                continue
+            exit_price, reason = resolved
+            result = position.close(
+                exit_time=int(row["open_time"]),
+                exit_price=exit_price,
+                exit_reason=reason,
+            )
+            closed_trades.append(ClosedTrade.from_result(result))
             for setup in setups:
-                if setup.id == trade.setup_id and setup.state == "ARMED":
-                    setup.state = "INVALIDATED" if r_mult < 0 else "CONFIRMED"
+                if setup.id == position.setup_id and setup.state == "ARMED":
+                    setup.state = "INVALIDATED" if result.realized_r < 0 else "CONFIRMED"
                     break
-            if r_mult < 0:
+            if result.realized_r < 0:
                 _append_invalidated_event(
                     events_out,
-                    setup_id=trade.setup_id,
-                    symbol=trade.symbol,
-                    setup_type=trade.setup_type,
-                    direction=trade.direction,
-                    timeframe=trade.tf,
+                    setup_id=position.setup_id,
+                    symbol=position.symbol,
+                    setup_type=position.setup_type,
+                    direction=position.direction,
+                    timeframe=position.tf,
                     bar_open_ms=int(row["open_time"]),
-                    invalidation_price=trade.sl,
+                    invalidation_price=position.stop_price,
                 )
             funnel[f"trade_closed_{reason}"] += 1
 
@@ -2035,6 +2381,30 @@ async def run_history_replay(
             row = tf_df.iloc[-1]
             high = float(row["high"])
             low = float(row["low"])
+            risk = planned_risk(position.plan, invalidation_price=position.sl)
+            if risk > 0:
+                favorable_price = high if position.direction == "LONG" else low
+                adverse_price = low if position.direction == "LONG" else high
+                position.mfe_r = max(
+                    position.mfe_r,
+                    position_pnl(
+                        position.plan,
+                        filled_fibs=position.filled_fibs,
+                        direction=position.direction,
+                        exit_price=favorable_price,
+                    )
+                    / risk,
+                )
+                position.mae_r = min(
+                    position.mae_r,
+                    position_pnl(
+                        position.plan,
+                        filled_fibs=position.filled_fibs,
+                        direction=position.direction,
+                        exit_price=adverse_price,
+                    )
+                    / risk,
+                )
             if position.direction == "LONG":
                 hit_sl = low <= position.sl
                 hit_tp = high >= position.tp
@@ -2044,7 +2414,6 @@ async def run_history_replay(
             if not hit_sl and not hit_tp:
                 continue
             exit_price = position.sl if hit_sl else position.tp
-            risk = planned_risk(position.plan, invalidation_price=position.sl)
             pnl = position_pnl(
                 position.plan,
                 filled_fibs=position.filled_fibs,
@@ -2052,6 +2421,15 @@ async def run_history_replay(
                 exit_price=exit_price,
             )
             avg_entry = weighted_average_entry(position.plan, position.filled_fibs)
+            fees, slippage, funding = _fib_position_costs(
+                position,
+                exit_price=exit_price,
+                fee_rate=float(cfg.history_replay.fee_rate),
+                slippage_rate=float(cfg.history_replay.slippage_rate),
+                spread_rate=float(cfg.history_replay.spread_rate),
+                funding_rate=float(cfg.history_replay.funding_rate),
+                exit_time=int(row["open_time"]),
+            )
             closed_trades.append(
                 ClosedTrade(
                     setup_id=position.setup_id,
@@ -2063,12 +2441,25 @@ async def run_history_replay(
                     exit_time=int(row["open_time"]),
                     entry=float(avg_entry or 0.0),
                     exit=exit_price,
-                    r_multiple=(pnl / risk) if risk > 0 else 0.0,
+                    r_multiple=((pnl - fees - slippage - funding) / risk) if risk > 0 else 0.0,
                     exit_reason=(
                         "both_hit_same_bar_sl_first"
                         if hit_sl and hit_tp
                         else ("sl" if hit_sl else "tp")
                     ),
+                    entry_type="cascade",
+                    stop_price=position.sl,
+                    tp_price=position.tp,
+                    position_size=filled_weight_pct(position.plan, position.filled_fibs) / 100.0,
+                    risk_usd=risk,
+                    realized_pnl=pnl - fees - slippage - funding,
+                    gross_r=(pnl / risk) if risk > 0 else 0.0,
+                    fees=fees,
+                    slippage=slippage,
+                    funding=funding,
+                    mae_r=position.mae_r,
+                    mfe_r=position.mfe_r,
+                    fib_depth=max(position.filled_fibs) if position.filled_fibs else None,
                 )
             )
             del fib_positions[setup_id]
@@ -2099,23 +2490,18 @@ async def run_history_replay(
                 len(events_out) if events_out is not None else 0,
             )
 
-    for trade in open_trades:
-        tf_df = dfs[trade.tf]
+    for position in open_trades:
+        tf_df = dfs[position.tf]
         row = tf_df.iloc[-1]
         exit_price = float(row["close"])
+        position.update_excursions(high=float(row["high"]), low=float(row["low"]))
         closed_trades.append(
-            ClosedTrade(
-                setup_id=trade.setup_id,
-                symbol=trade.symbol,
-                setup_type=trade.setup_type,
-                direction=trade.direction,
-                tf=trade.tf,
-                entry_time=trade.entry_time,
-                exit_time=int(row["open_time"]),
-                entry=trade.entry,
-                exit=exit_price,
-                r_multiple=_calc_r(trade.direction, trade.entry, exit_price, trade.risk),
-                exit_reason="eod_close",
+            ClosedTrade.from_result(
+                position.close(
+                    exit_time=int(row["open_time"]),
+                    exit_price=exit_price,
+                    exit_reason="eod_close",
+                )
             )
         )
         funnel["trade_closed_eod"] += 1
@@ -2132,6 +2518,15 @@ async def run_history_replay(
             exit_price=exit_price,
         )
         avg_entry = weighted_average_entry(position.plan, position.filled_fibs)
+        fees, slippage, funding = _fib_position_costs(
+            position,
+            exit_price=exit_price,
+            fee_rate=float(cfg.history_replay.fee_rate),
+            slippage_rate=float(cfg.history_replay.slippage_rate),
+            spread_rate=float(cfg.history_replay.spread_rate),
+            funding_rate=float(cfg.history_replay.funding_rate),
+            exit_time=int(row["open_time"]),
+        )
         closed_trades.append(
             ClosedTrade(
                 setup_id=position.setup_id,
@@ -2143,8 +2538,21 @@ async def run_history_replay(
                 exit_time=int(row["open_time"]),
                 entry=float(avg_entry or 0.0),
                 exit=exit_price,
-                r_multiple=(pnl / risk) if risk > 0 else 0.0,
+                r_multiple=((pnl - fees - slippage - funding) / risk) if risk > 0 else 0.0,
                 exit_reason="eod_close",
+                entry_type="cascade",
+                stop_price=position.sl,
+                tp_price=position.tp,
+                position_size=filled_weight_pct(position.plan, position.filled_fibs) / 100.0,
+                risk_usd=risk,
+                realized_pnl=pnl - fees - slippage - funding,
+                gross_r=(pnl / risk) if risk > 0 else 0.0,
+                fees=fees,
+                slippage=slippage,
+                funding=funding,
+                mae_r=position.mae_r,
+                mfe_r=position.mfe_r,
+                fib_depth=max(position.filled_fibs) if position.filled_fibs else None,
             )
         )
         funnel["fib_dca_trade_closed_eod"] += 1
@@ -2171,7 +2579,11 @@ async def run_history_replay(
         if progress:
             _print_progress(f"  retrace pivot filter: {len(events_out)}")
 
-    summary = _summarize(symbol=symbol, mode=mode, closed_trades=closed_trades)
+    summary = _summarize(
+        symbol=symbol,
+        mode=f"{mode}/{variant.upper()}",
+        closed_trades=closed_trades,
+    )
     if not quiet:
         _print_report(
             summary=summary,
@@ -2179,6 +2591,7 @@ async def run_history_replay(
             funnel=funnel,
             top_reasons=top_reasons,
         )
+    return ReplayReport(summary=summary, closed_trades=closed_trades, funnel=funnel)
 
 
 def main() -> None:
@@ -2221,21 +2634,41 @@ def main() -> None:
         default=None,
         help="Переопределить cap авторасширения младших TF для replay",
     )
+    parser.add_argument(
+        "--variant",
+        default="configured",
+        choices=("configured", "A", "B", "C", "D", "E", "all"),
+        help="A/B/C/D/E strategy variant; all runs every variant on the requested horizon",
+    )
+    parser.add_argument(
+        "--min-rr",
+        type=float,
+        default=None,
+        help="Override minimum RR to compare thresholds such as 1.5, 2.0, 2.5, 3.0",
+    )
     args = parser.parse_args()
 
     config_path = _find_config_path()
-    asyncio.run(
-        run_history_replay(
-            symbol=args.symbol,
-            mode=args.mode,
-            limit=args.limit,
-            top_reasons=args.top_reasons,
-            config_path=config_path,
-            focus_htf=args.focus_htf,
-            progress=args.progress,
-            max_expanded_bars_per_tf=args.max_expanded_bars_per_tf,
-        )
-    )
+
+    async def run_selected() -> None:
+        variants = ("A", "B", "C", "D", "E") if args.variant == "all" else (args.variant,)
+        history_cache: dict[tuple[str, str, int], list[Any]] = {}
+        for variant in variants:
+            await run_history_replay(
+                symbol=args.symbol,
+                mode=args.mode,
+                limit=args.limit,
+                top_reasons=args.top_reasons,
+                config_path=config_path,
+                focus_htf=args.focus_htf,
+                progress=args.progress,
+                max_expanded_bars_per_tf=args.max_expanded_bars_per_tf,
+                variant=variant,
+                min_rr=args.min_rr,
+                history_cache=history_cache,
+            )
+
+    asyncio.run(run_selected())
 
 
 if __name__ == "__main__":

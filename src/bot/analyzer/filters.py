@@ -48,46 +48,31 @@ def rr_ok(entry: float, sl: float, tp: float, min_rr: float) -> bool:
     return (reward / risk) >= min_rr
 
 
-def entry_sl_tp_levels(
-    *,
-    entry: float,
-    direction: str,
-    invalidation_price: float,
-    tp_r_multiple: float = 2.0,
-) -> tuple[float, float]:
-    sl = invalidation_price
-    distance = abs(entry - sl)
-    if direction == "LONG":
-        tp = entry + (distance * tp_r_multiple)
-    else:
-        tp = entry - (distance * tp_r_multiple)
-    return sl, tp
-
-
 def finalize_entry_levels(
     *,
     entry: float,
     direction: str,
     invalidation_price: float,
+    target_price: float | None = None,
     compute_sl_tp: bool,
     min_rr: float,
-    tp_r_multiple: float = 2.0,
 ) -> tuple[dict[str, float] | None, str | None]:
     """SL/TP для ENTRY-сигнала.
 
     Returns ``(payload_fields, reject_reason)``. При ``compute_sl_tp=False``
-    поля не считаются и RR не проверяется. ``reject_reason``: ``zero_risk`` |
-    ``rr_below_min``.
+    поля не считаются и RR не проверяется. TP всегда должен быть реальной
+    рыночной целью, уже найденной на этапе PREPARE. ``reject_reason``:
+    ``missing_target`` | ``target_wrong_side`` | ``zero_risk`` | ``rr_below_min``.
     """
     if not compute_sl_tp:
         return None, None
 
-    sl, tp = entry_sl_tp_levels(
-        entry=entry,
-        direction=direction,
-        invalidation_price=invalidation_price,
-        tp_r_multiple=tp_r_multiple,
-    )
+    if target_price is None:
+        return None, "missing_target"
+    sl = float(invalidation_price)
+    tp = float(target_price)
+    if (direction == "LONG" and tp <= entry) or (direction == "SHORT" and tp >= entry):
+        return None, "target_wrong_side"
     if abs(entry - sl) == 0:
         return None, "zero_risk"
     if not rr_ok(entry, sl, tp, min_rr):

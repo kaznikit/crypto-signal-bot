@@ -48,12 +48,12 @@ class ContinuationConfig(BaseModel):
     """
 
     fib_low: float = 0.5
+    fib_high: float = 0.786
     # Окно lookback для BOS/CHoCH в сторону импульса. Без свежего структурного
     # пробоя в сторону тренда PREPARE-continuation не строится.
     structure_max_bars_ago: int = 30
 
     # === Legacy (игнорируется в pivot-стеке) ===
-    fib_high: float = 0.618
     impulse_lookback: int = 60
     impulse_swing_length: int = 10
     min_impulse_atr: float = 0.0
@@ -195,6 +195,8 @@ class EntryConfig(BaseModel):
     ltf_swing_use_pivot_sizes: bool = False
     # Максимум ENTRY-сигналов на один setup, пока он остаётся валидным.
     max_entries_per_setup: int = 1
+    # Доли общего риска 1R для первого входа и подтвержденных re-entry.
+    risk_fractions: list[float] = Field(default_factory=lambda: [0.6, 0.4])
     # Каскадный ENTRY: после PREPARE на HTF подтверждение идёт по цепочке TF,
     # например 1H -> 5M BOS/CHoCH -> 1M BOS/CHoCH.
     cascade_enabled: bool = False
@@ -210,6 +212,10 @@ class EntryConfig(BaseModel):
     def validate_comparison_modes(self) -> EntryConfig:
         if len(set(self.comparison_modes)) != len(self.comparison_modes):
             raise ValueError("entry.comparison_modes must be unique")
+        if not self.risk_fractions or any(float(value) <= 0 for value in self.risk_fractions):
+            raise ValueError("entry.risk_fractions must contain positive values")
+        if sum(float(value) for value in self.risk_fractions) > 1.0 + 1e-9:
+            raise ValueError("entry.risk_fractions total must not exceed 1R")
         return self
 
     def active_modes(self) -> tuple[str, ...]:
@@ -228,6 +234,14 @@ class FiltersConfig(BaseModel):
 class RiskConfig(BaseModel):
     sl_buffer_atr: float = 0.5
     tp_r_multiples: list[float] = Field(default_factory=lambda: [2.0, 3.0])
+    risk_per_setup_pct: float = 1.0
+    max_total_open_risk_pct: float = 3.0
+    max_same_direction_risk_pct: float = 2.0
+    max_correlated_risk_pct: float = 2.0
+    max_positions: int = 3
+    correlation_groups: dict[str, list[str]] = Field(default_factory=dict)
+    block_long_on_btc_bearish: bool = True
+    block_short_on_btc_bullish: bool = True
 
 
 class TelegramConfig(BaseModel):
@@ -267,6 +281,25 @@ class HistoryReplayConfig(BaseModel):
     # Для каскада 1H -> 15M -> 5M -> 1M нужен глубокий 1M-ряд:
     # 1000 свечей 1H = до 60000 свечей 1M.
     max_expanded_bars_per_tf: int = 4_000
+    intrabar_policy: Literal["conservative", "tp_first"] = "conservative"
+    fee_rate: float = 0.00055
+    slippage_rate: float = 0.0002
+    spread_rate: float = 0.0001
+    funding_rate: float = 0.0
+    fib_levels: list[float] = Field(default_factory=lambda: [0.5, 0.618, 0.705, 0.786])
+    mfi_filter_enabled: bool = False
+
+    @model_validator(mode="after")
+    def validate_replay_costs(self) -> HistoryReplayConfig:
+        if any(
+            value < 0
+            for value in (self.fee_rate, self.slippage_rate, self.spread_rate, self.funding_rate)
+        ):
+            raise ValueError("history_replay cost rates must be non-negative")
+        fibs = [float(value) for value in self.fib_levels]
+        if fibs != sorted(fibs) or len(set(fibs)) != len(fibs):
+            raise ValueError("history_replay.fib_levels must be unique and sorted")
+        return self
 
 
 class EntryStatsConfig(BaseModel):
@@ -307,6 +340,8 @@ class StrategyFeaturesConfig(BaseModel):
 
     require_liquidity_grab_reversal: bool = False
     quality_score_enabled: bool = True
+    # Score is observational by default; enable explicitly only after validation.
+    quality_score_filter_enabled: bool = False
     min_quality_score: int = 0
     volume_expansion_in_score: bool = True
     continuation_require_4h_alignment: bool = False

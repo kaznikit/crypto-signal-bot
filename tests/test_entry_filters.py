@@ -6,6 +6,7 @@ def test_finalize_entry_levels_skips_when_disabled() -> None:
         entry=100.0,
         direction="LONG",
         invalidation_price=90.0,
+        target_price=None,
         compute_sl_tp=False,
         min_rr=10.0,
     )
@@ -18,6 +19,7 @@ def test_finalize_entry_levels_computes_and_checks_rr() -> None:
         entry=100.0,
         direction="LONG",
         invalidation_price=90.0,
+        target_price=120.0,
         compute_sl_tp=True,
         min_rr=1.5,
     )
@@ -32,6 +34,7 @@ def test_finalize_entry_levels_rejects_zero_risk() -> None:
         entry=100.0,
         direction="LONG",
         invalidation_price=100.0,
+        target_price=120.0,
         compute_sl_tp=True,
         min_rr=1.0,
     )
@@ -49,11 +52,25 @@ def test_finalize_entry_levels_rejects_low_rr() -> None:
         entry=100.0,
         direction="LONG",
         invalidation_price=99.99,
+        target_price=100.02,
         compute_sl_tp=True,
         min_rr=3.0,
     )
     assert levels is None
     assert reject == "rr_below_min"
+
+
+def test_finalize_entry_levels_requires_real_market_target() -> None:
+    levels, reject = finalize_entry_levels(
+        entry=100.0,
+        direction="LONG",
+        invalidation_price=90.0,
+        target_price=None,
+        compute_sl_tp=True,
+        min_rr=1.5,
+    )
+    assert levels is None
+    assert reject == "missing_target"
 
 
 def test_recommended_entry_stop_uses_valid_reset_level() -> None:

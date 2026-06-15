@@ -103,6 +103,43 @@ class Signal(Base):
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
+class Trade(Base):
+    __tablename__ = "trades"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    setup_id: Mapped[str] = mapped_column(String(64), index=True)
+    symbol: Mapped[str] = mapped_column(String(32), index=True)
+    direction: Mapped[str] = mapped_column(String(8), index=True)
+    setup_type: Mapped[str] = mapped_column(String(32), index=True)
+    entry_type: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16), index=True, default="OPEN")
+    entry_time: Mapped[int] = mapped_column(Integer)
+    entry_price: Mapped[float] = mapped_column(Float)
+    position_size: Mapped[float] = mapped_column(Float)
+    stop_price: Mapped[float] = mapped_column(Float)
+    tp_price: Mapped[float] = mapped_column(Float)
+    risk_usd: Mapped[float] = mapped_column(Float, default=1.0)
+    risk_r: Mapped[float] = mapped_column(Float, default=1.0)
+    exit_time: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    realized_r: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fees: Mapped[float] = mapped_column(Float, default=0.0)
+    slippage: Mapped[float] = mapped_column(Float, default=0.0)
+    funding: Mapped[float] = mapped_column(Float, default=0.0)
+    mae_r: Mapped[float] = mapped_column(Float, default=0.0)
+    mfe_r: Mapped[float] = mapped_column(Float, default=0.0)
+    fib_depth: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bos_or_choch_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    market_regime: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    btc_context: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    entries_json: Mapped[str] = mapped_column(Text, default="[]")
+    features_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class KlineCache(Base):
     __tablename__ = "klines_cache"
 

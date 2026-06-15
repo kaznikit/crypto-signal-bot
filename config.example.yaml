@@ -13,6 +13,7 @@ reversal:
   choch_lookback_bars: 30
 continuation:
   fib_low: 0.5
+  fib_high: 0.786
   structure_max_bars_ago: 120
 pivots:
   swing_size_by_tf:
@@ -40,14 +41,15 @@ entry:
     "15M": 6
     "1H": 8
   ltf_swing_use_pivot_sizes: false
-  max_entries_per_setup: 1
+  max_entries_per_setup: 2
+  risk_fractions: [0.6, 0.4]
   ltf_max_bars_ago: 24
   ltf_max_bars_ago_by_tf:
     "1M": 120
     "5M": 96
     "15M": 36
     "1H": 18
-  compute_sl_tp: false
+  compute_sl_tp: true
   require_close_beyond_choch: false
   confirm_structure_kinds: [CHOCH, BOS]
   structure_lookback: since_prepare
@@ -96,6 +98,14 @@ filters:
 risk:
   sl_buffer_atr: 0.5
   tp_r_multiples: [2, 3]
+  risk_per_setup_pct: 1.0
+  max_total_open_risk_pct: 3.0
+  max_same_direction_risk_pct: 2.0
+  max_correlated_risk_pct: 2.0
+  max_positions: 3
+  correlation_groups: {}
+  block_long_on_btc_bearish: true
+  block_short_on_btc_bullish: true
 telegram:
   prepare_chat_id_env: TG_PREPARE_CHAT_ID
   entry_chat_id_env: TG_ENTRY_CHAT_ID
@@ -121,6 +131,13 @@ paper_mode:
       "1H": 10
 history_replay:
   max_expanded_bars_per_tf: 60000
+  intrabar_policy: conservative
+  fee_rate: 0.00055
+  slippage_rate: 0.0002
+  spread_rate: 0.0001
+  funding_rate: 0.0
+  fib_levels: [0.5, 0.618, 0.705, 0.786]
+  mfi_filter_enabled: false
 entry_stats:
   enabled: true
   check_interval_hours: 24
@@ -139,6 +156,7 @@ prepare_stats:
 strategy_features:
   require_liquidity_grab_reversal: false
   quality_score_enabled: true
+  quality_score_filter_enabled: false
   min_quality_score: 20
   volume_expansion_in_score: true
   continuation_require_4h_alignment: false

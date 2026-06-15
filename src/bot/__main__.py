@@ -58,7 +58,7 @@ from bot.entry_stats import (
 )
 from bot.exchange.bybit_client import INTERVAL_MS_MAP, BybitClient
 from bot.market.candles import candles_to_df
-from bot.market.pivots import extract_structure_breaks_htf
+from bot.market.pivots import extract_structure_breaks_htf, latest_structure_break
 from bot.notify.telegram import TelegramNotifier
 from bot.prepare_stats import (
     build_prepare_stats_candidates,
@@ -189,6 +189,67 @@ class SignalBotApp:
         )
         self._scheduler = TimeframeScheduler()
         self._latest_4h_series: dict[str, Any] = {}
+
+    def _risk_limits_allow_entry(self, setup: Any, risk_fraction: float) -> tuple[bool, str]:
+        load_open_trades = getattr(self._repo, "load_open_trades", None)
+        if not callable(load_open_trades):
+            return True, "risk_limits_unavailable"
+        open_trades = load_open_trades()
+        risk_cfg = self._cfg.risk
+        per_setup_pct = float(risk_cfg.risk_per_setup_pct)
+        additional_pct = float(risk_fraction) * per_setup_pct
+        current = next((trade for trade in open_trades if trade.setup_id == setup.id), None)
+        current_setup_pct = (float(current.risk_r) * per_setup_pct) if current is not None else 0.0
+        if current_setup_pct + additional_pct > per_setup_pct + 1e-9:
+            return False, "risk_limit_setup"
+        if current is None and len(open_trades) >= int(risk_cfg.max_positions):
+            return False, "risk_limit_positions"
+        total_pct = sum(float(trade.risk_r) * per_setup_pct for trade in open_trades)
+        if total_pct + additional_pct > float(risk_cfg.max_total_open_risk_pct) + 1e-9:
+            return False, "risk_limit_total"
+        direction_pct = sum(
+            float(trade.risk_r) * per_setup_pct
+            for trade in open_trades
+            if trade.direction == setup.direction
+        )
+        if direction_pct + additional_pct > float(risk_cfg.max_same_direction_risk_pct) + 1e-9:
+            return False, "risk_limit_direction"
+        for symbols in risk_cfg.correlation_groups.values():
+            normalized = {str(symbol).upper() for symbol in symbols}
+            if str(setup.symbol).upper() not in normalized:
+                continue
+            correlated_pct = sum(
+                float(trade.risk_r) * per_setup_pct
+                for trade in open_trades
+                if str(trade.symbol).upper() in normalized
+            )
+            if correlated_pct + additional_pct > float(risk_cfg.max_correlated_risk_pct) + 1e-9:
+                return False, "risk_limit_correlation"
+
+        btc_df = self._latest_4h_series.get("BTCUSDT")
+        if str(setup.symbol).upper() != "BTCUSDT" and btc_df is not None and not btc_df.empty:
+            btc_breaks = extract_structure_breaks_htf(
+                btc_df,
+                swing_size=int(self._cfg.pivots.swing_size_by_tf.get("4H", 15)),
+                use_close=self._cfg.pivots.bos_use_close,
+                impulse_lock=True,
+            )
+            btc_structure = latest_structure_break(btc_breaks)
+            if (
+                setup.direction == "LONG"
+                and risk_cfg.block_long_on_btc_bearish
+                and btc_structure is not None
+                and btc_structure.direction == "SHORT"
+            ):
+                return False, "risk_limit_btc_bearish"
+            if (
+                setup.direction == "SHORT"
+                and risk_cfg.block_short_on_btc_bullish
+                and btc_structure is not None
+                and btc_structure.direction == "LONG"
+            ):
+                return False, "risk_limit_btc_bullish"
+        return True, "risk_limits_passed"
 
     def _invalidate_active_setups_for_key(
         self,
@@ -698,6 +759,7 @@ class SignalBotApp:
             swing_size=swing_htf,
             structure_max_bars_ago=self._cfg.continuation.structure_max_bars_ago,
             fib_level=self._cfg.continuation.fib_low,
+            fib_zone_high=self._cfg.continuation.fib_high,
             impulse_max_age_bars=self._cfg.pivots.impulse_max_age_bars,
             bos_use_close=self._cfg.pivots.bos_use_close,
             ttl_hours=24,
@@ -835,15 +897,17 @@ class SignalBotApp:
                 funnel["entry_skipped_open_position"] += 1
                 continue
 
-            if getattr(setup, "active_trade_stop_price", None) is not None:
-                await self._advance_open_trade(
+            has_active_trade = getattr(setup, "active_trade_stop_price", None) is not None
+            if has_active_trade:
+                still_open = await self._advance_open_trade(
                     setup=setup,
                     symbol=symbol,
                     series=series,
                     closed_tfs=closed_tfs,
                     funnel=funnel,
                 )
-                continue
+                if not still_open or int(setup.entry_count or 0) >= max_entries_per_setup:
+                    continue
 
             setup_entry_mode = str(getattr(setup, "entry_mode", "simple")).lower()
             if setup_entry_mode == "fib_dca" and deserialize_filled_fibs(
@@ -1075,8 +1139,28 @@ class SignalBotApp:
                     if ltf_result.recommended_stop is not None
                     else simple_stop
                 )
+                if getattr(setup, "active_trade_stop_price", None) is not None:
+                    recommended_stop = float(setup.active_trade_stop_price)
                 payload["entry_mode"] = str(getattr(setup, "entry_mode", "simple"))
                 payload["entry_variant"] = _entry_variant_for_setup(setup, self._cfg.entry)
+                risk_index = int(setup.entry_count or 0)
+                if max_entries_per_setup <= 1:
+                    risk_fraction = 1.0
+                elif risk_index < len(self._cfg.entry.risk_fractions):
+                    risk_fraction = float(self._cfg.entry.risk_fractions[risk_index])
+                else:
+                    risk_fraction = max(
+                        0.0,
+                        1.0 - sum(float(value) for value in self._cfg.entry.risk_fractions),
+                    )
+                payload["risk_fraction"] = risk_fraction
+                payload["total_allocated_risk"] = min(
+                    1.0,
+                    sum(
+                        float(value)
+                        for value in self._cfg.entry.risk_fractions[: risk_index + 1]
+                    ),
+                )
                 payload["recommended_stop"] = recommended_stop
                 payload["recommended_stop_source"] = (
                     str(ltf_result.recommended_stop_source or "advanced")
@@ -1117,6 +1201,7 @@ class SignalBotApp:
                         entry=entry_price,
                         direction=setup.direction,
                         invalidation_price=recommended_stop,
+                        target_price=payload.get("target_price"),
                         compute_sl_tp=self._cfg.entry.compute_sl_tp,
                         min_rr=min_rr,
                     )
@@ -1125,6 +1210,13 @@ class SignalBotApp:
                     continue
                 if reject == "rr_below_min":
                     funnel["entry_rejected_rr_below_min"] += 1
+                    continue
+                if reject in {"missing_target", "target_wrong_side"}:
+                    funnel[f"entry_rejected_{reject}"] += 1
+                    continue
+                risk_allowed, risk_reason = self._risk_limits_allow_entry(setup, risk_fraction)
+                if not risk_allowed:
+                    funnel[risk_reason] += 1
                     continue
                 if levels is not None:
                     payload.update(levels)
@@ -1141,19 +1233,31 @@ class SignalBotApp:
                     funnel["entry_send_skipped"] += 1
                     continue
                 self._repo.save_signal(signal_row)
+                save_trade_entry = getattr(self._repo, "upsert_trade_entry", None)
+                has_trade_levels = all(key in payload for key in ("entry", "sl", "tp"))
+                if callable(save_trade_entry) and has_trade_levels:
+                    save_trade_entry(
+                        setup=setup,
+                        payload=payload,
+                        entry_time=bar_open_ms,
+                        at=utcnow(),
+                    )
                 setup.entry_count = int(setup.entry_count or 0) + 1
                 setup.last_entry_bar_ms = bar_open_ms
                 setup.last_entry_price = entry_price
                 setup.last_entry_swing_level = (
                     float(choch.reset_level) if choch.reset_level is not None else None
                 )
-                setup.active_trade_stop_price = recommended_stop
-                setup.active_trade_target_price = float(
-                    payload.get("target_price")
-                    or payload.get("tp")
-                    or setup.entry_target_price
-                )
-                setup.active_trade_tf = used_tf
+                if setup.active_trade_stop_price is None:
+                    setup.active_trade_stop_price = recommended_stop
+                if setup.active_trade_target_price is None:
+                    setup.active_trade_target_price = float(
+                        payload.get("target_price")
+                        or payload.get("tp")
+                        or setup.entry_target_price
+                    )
+                if setup.active_trade_tf is None:
+                    setup.active_trade_tf = used_tf
                 setup.state = "ARMED"
                 if not comparison_enabled:
                     position_setup_id = setup.id
@@ -1233,12 +1337,12 @@ class SignalBotApp:
         series: dict[str, Any],
         closed_tfs: list[str],
         funnel: Counter[str],
-    ) -> None:
+    ) -> bool:
         trade_tf = str(getattr(setup, "active_trade_tf", None) or setup.htf)
         df = series.get(trade_tf)
         if trade_tf not in set(closed_tfs) or df is None or df.empty:
             funnel["active_trade_tf_not_closed"] += 1
-            return
+            return True
         row = df.iloc[-1]
         low = float(row["low"])
         high = float(row["high"])
@@ -1256,13 +1360,32 @@ class SignalBotApp:
                 mark_price=stop,
             )
             self._repo.mark_setup_state(setup.id, "INVALIDATED", utcnow())
+            close_trade = getattr(self._repo, "close_trade", None)
+            if callable(close_trade):
+                close_trade(
+                    setup_id=setup.id,
+                    exit_time=bar_open_ms,
+                    exit_price=stop,
+                    exit_reason="SL",
+                    at=utcnow(),
+                )
             funnel["active_trade_stopped"] += 1
-            return
+            return False
         if hit_target:
             self._repo.mark_setup_state(setup.id, "CONFIRMED", utcnow())
+            close_trade = getattr(self._repo, "close_trade", None)
+            if callable(close_trade):
+                close_trade(
+                    setup_id=setup.id,
+                    exit_time=int(row["open_time"]),
+                    exit_price=target,
+                    exit_reason="TP",
+                    at=utcnow(),
+                )
             funnel["active_trade_target_reached"] += 1
-            return
+            return False
         funnel["active_trade_open"] += 1
+        return True
 
     async def _advance_fib_dca_setup(
         self,

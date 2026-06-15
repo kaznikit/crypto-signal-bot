@@ -89,9 +89,12 @@ class StructuralEntryStrategy:
             entry=entry_price,
             direction=str(setup.direction),
             invalidation_price=float(setup.invalidation_price),
+            target_price=getattr(setup, "entry_target_price", None),
             compute_sl_tp=context.entry.compute_sl_tp,
             min_rr=context.min_rr,
         )
+        if reject in {"missing_target", "target_wrong_side"}:
+            return EntryDecision(False, f"entry_rejected_{reject}")
         if reject == "zero_risk":
             return EntryDecision(False, "entry_rejected_zero_risk")
         if reject == "rr_below_min":

@@ -26,8 +26,8 @@ def volume_expansion_filter(df: pd.DataFrame, multiplier: float = 1.2) -> bool:
 def quality_score(
     has_liquidity_grab: bool,
     has_volume_expansion: bool,
-    rr: float,
-    htf_alignment: bool,
+    rr: float | None,
+    htf_alignment: bool | None,
     in_ob_or_fvg: bool = False,
 ) -> int:
     score = 0
@@ -35,11 +35,11 @@ def quality_score(
         score += 20
     if has_volume_expansion:
         score += 20
-    if rr >= 1.5:
+    if rr is not None and rr >= 1.5:
         score += 20
-    if rr >= 2.0:
+    if rr is not None and rr >= 2.0:
         score += 10
-    if htf_alignment:
+    if htf_alignment is True:
         score += 20
     if in_ob_or_fvg:
         score += 10
