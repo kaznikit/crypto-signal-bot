@@ -300,11 +300,17 @@ signal-bot-replay --symbol ETHUSDT --mode reversal --limit 1000
 Replay создаёт полноценную позицию только после ENTRY с рыночной целью,
 stop и положительным RR. Варианты:
 
-- `A` — первый свежий CHOCH, один вход и риск `1R`;
-- `B` — первый свежий CHOCH или BOS, один вход и риск `1R`;
-- `C` — CHOCH + подтверждённый re-entry с общим риском `0.6R + 0.4R`;
-- `D` — вариант C с MFI-фильтром; в остальных вариантах MFI только логируется;
-- `E` — слепой Fib DCA как контрольная группа.
+| Вариант | Что проверяет | Риск |
+| --- | --- | --- |
+| `A` | Первый свежий `CHOCH` после касания Fib `0.5`, один вход | `1R` |
+| `B` | Первый свежий `CHOCH` или `BOS` после касания Fib `0.5`, один вход | `1R` |
+| `C` | Вариант `A` + подтверждённый re-entry после reset swing и нового BOS | `0.6R + 0.4R`, максимум `1R` |
+| `D` | Вариант `C` + MFI как фильтр входа | максимум `1R` |
+| `E` | Слепой Fib DCA/каскад по уровням `0.5/0.618/0.705/0.786`; контрольная группа, не основной вход | `1R` по всей лестнице |
+
+Во всех вариантах, кроме `D`, MFI только логируется в признаки сделки и не
+влияет на решение. `E` нужен для сравнения с механической лестницей, а не как
+основной кандидат стратегии.
 
 Комиссия, проскальзывание, spread и консервативный порядок SL/TP на одной
 свече задаются в `history_replay`. Итоговый отчёт показывает expectancy после
@@ -441,7 +447,10 @@ Pine-индикатор Leviathan'а сам по себе **не делает** 
 
 ### Pine overlay (история через replay)
 
-Самый быстрый способ увидеть сигналы на TV — выгрузить их прямо из walk-forward-симуляции на свежей истории Bybit, не дожидаясь, пока live-бот накопит сделки в `bot.db`:
+Самый быстрый способ проверить точки входа на TV — выгрузить их прямо из
+walk-forward-симуляции на свежей истории Bybit, не дожидаясь, пока live-бот
+накопит сделки в `bot.db`. По умолчанию Pine показывает только вход, тейк и
+стоп лейблами у свечи:
 
 ```bash
 cd crypto-signal-bot
@@ -451,13 +460,18 @@ signal-bot-export-pine --symbol BTCUSDT --tf 4H --from-replay --mode both --limi
 signal-bot-export-pine --symbol BTCUSDT --tf 4H --from-replay --include-liberal --out btc_all.pine
 # узкий период:
 signal-bot-export-pine --symbol ETHUSDT --tf 1H --from-replay --mode continuation --since 2026-04-01 --out eth_1h.pine
+# отдельная проверка PREPARE: бар касания 0.5 + начало/конец HTF-импульса:
+signal-bot-export-pine --symbol ETHUSDT --tf 1H --from-replay --mode continuation --kinds PREPARE --out eth_1h_prepare.pine
 ```
 
 Параметры `--from-replay`:
 - `--mode {reversal,continuation,both}` — какие сетапы симулировать;
 - `--limit N` — свечей на TF (≤1000, Bybit klines API);
 - `--max-expanded-bars-per-tf N` — cap младших TF при авторасширении истории (`1H -> 1M` при `--limit 1000` требует до `60000`);
-- `--max-markers 400` — режется до N **последних** маркеров (Pine v5 лимит ~500 на индикатор: каждый PREPARE = label+box, ENTRY = label + 2 line, INVALIDATED = label).
+- `--variant {configured,A,B,C,D,E}` — какой вариант ENTRY выгрузить в Pine;
+- `--min-rr N` — переопределить минимальный RR для проверки порогов `1.5/2.0/2.5/3.0`;
+- `--kinds ENTRY,TAKE_PROFIT,STOP_LOSS` — какие события вывести; это дефолт. Для проверки PREPARE используйте `--kinds PREPARE`;
+- `--max-markers 400` — режется до N **последних** лейблов (Pine v5 лимит ~500 на индикатор).
 
 ### Pine overlay из `bot.db`
 
@@ -473,16 +487,14 @@ signal-bot-export-pine --symbol BTCUSDT --tf 4H --include-liberal --out btc_all.
 1. Откройте график **`BYBIT:SYMBOL`** на том же TF, что задавали в `--tf` (для ENTRY совпадение по TF подтверждения важно — иначе timestamps не сядут на бары).
 2. Pine Editor → New → вставьте содержимое `.pine` → Save → Add to chart.
 3. На графике появится:
-   - **PREPARE** — лейбл `P LONG/SHORT` на 0.5-уровне импульса (бара первого касания);
-   - **ENTRY** — лейбл `E LONG/SHORT` с линиями SL (красная) и TP (зелёная);
-   - **INVALIDATED** — крестик;
-   - **STRUCTURE** (`CHoCH` / `BOS`) — горизонтальная линия от ломаемого пивота до бара пробоя; CHoCH — пунктир, BOS — сплошная.
-   - **IMPULSE** — диагональ от HL до HH (LONG) или от LH до LL (SHORT), плюс штриховая 0.5-линия (Pine 0.5-mid), продлённая вперёд от пика на N баров (input `IMPULSE fib forward bars`, дефолт 40). Это ровно те 0.5-линии, которые рисует Pine-индикатор Leviathan'а.
-   - **PIVOT** — мини-лейблы `HH` / `LH` / `HL` / `LL` на пивотах. Размер `tiny`, серый фон — те самые буквы из исходного Pine-индикатора.
-4. По умолчанию `--kinds PREPARE,ENTRY,INVALIDATED,STRUCTURE,PIVOT`: импульсные
-   диагонали скрыты, чтобы не перегружать график. Для их отображения добавьте
-   `IMPULSE` явно и включите input `Show IMPULSE` в TradingView; например
-   `--kinds PREPARE,ENTRY,INVALIDATED,STRUCTURE,IMPULSE,PIVOT`.
+   - **PREPARE** — бирюзовый/оранжевый лейбл `PREPARE LONG/SHORT` на баре касания 0.5, плюс `IMP START` и `IMP END` на начале/конце HTF-импульса;
+   - **ENTRY** — синий лейбл `ENTRY LONG/SHORT`;
+   - **TAKE_PROFIT** — зелёный лейбл `TP LONG/SHORT`;
+   - **STOP_LOSS** — красный лейбл `SL LONG/SHORT`.
+   Если один timestamp одновременно попадает в начало и конец разных импульсов,
+   overlay оставляет только `IMP END`, чтобы свеча не имела двух смыслов сразу.
+4. Линии SL/TP, STRUCTURE, IMPULSE и PIVOT в этом шаблоне не рисуются,
+   чтобы график оставался пригодным для ручной проверки выбранного типа сигнала.
 
 Если нужен обратный канал TV → бот, делайте отдельный webhook-эндпоинт; в этом боте не реализовано.
 

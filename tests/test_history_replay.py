@@ -4,9 +4,12 @@ from bot.history_replay import (
     ClosedTrade,
     FibOpenPosition,
     OpenTrade,
+    ReplaySetup,
+    _append_trade_exit_event,
     _collapse_impulse_fanout_by_start,
-    _emit_fresh_pivot_events,
     _dedupe_overlay_events,
+    _emit_fresh_pivot_events,
+    _expanded_limits_by_tf,
     _filter_invalidated_impulses,
     _filter_stale_structure_events,
     _has_open_position,
@@ -15,8 +18,6 @@ from bot.history_replay import (
     _max_drawdown_r,
     _normalize_structure_sequence,
     _resolve_trade_exit,
-    ReplaySetup,
-    _expanded_limits_by_tf,
     _summarize,
 )
 
@@ -78,6 +79,41 @@ def test_open_position_blocks_other_setup_but_allows_own_fib_fills() -> None:
     assert _has_open_position([], {"fib-1": fib_position}) is True
     assert _has_open_position([], {"fib-1": fib_position}, setup_id="fib-1") is False
     assert _has_open_position([], {"fib-1": fib_position}, setup_id="other") is True
+
+
+def test_trade_exit_event_keeps_setup_htf_for_pine_export_filter() -> None:
+    events: list[dict] = []
+
+    _append_trade_exit_event(
+        events,
+        setup_id="setup-1",
+        symbol="BTCUSDT",
+        setup_type="CONTINUATION",
+        direction="LONG",
+        timeframe="5M",
+        setup_htf="1H",
+        bar_open_ms=1_000,
+        exit_price=110.0,
+        exit_reason="tp",
+    )
+
+    assert events == [
+        {
+            "kind": "TAKE_PROFIT",
+            "subkind": "TP",
+            "setup_id": "setup-1",
+            "symbol": "BTCUSDT",
+            "setup_type": "CONTINUATION",
+            "direction": "LONG",
+            "htf": "5M",
+            "setup_htf": "1H",
+            "bar_open_ms": 1_000,
+            "exit_price": 110.0,
+            "exit_reason": "tp",
+            "mark_price": 110.0,
+            "after_entry": True,
+        }
+    ]
 
 
 def test_dedupe_overlay_events_collapses_duplicate_invalidation() -> None:

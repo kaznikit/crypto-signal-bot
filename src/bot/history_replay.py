@@ -778,7 +778,12 @@ def _filter_stale_structure_events(
             ev
             for ev in out
             if not (
-                str(ev.get("kind") or "") in {"ENTRY", "INVALIDATED"}
+                str(ev.get("kind") or "") in {
+                    "ENTRY",
+                    "INVALIDATED",
+                    "STOP_LOSS",
+                    "TAKE_PROFIT",
+                }
                 and str(ev.get("setup_id") or "") in removed_prepare_ids
                 and str(ev.get("setup_id") or "") not in kept_prepare_ids
             )
@@ -826,7 +831,7 @@ def _dedupe_overlay_events(events: list[dict[str, Any]]) -> None:
                 str(ev.get("setup_id") or ""),
                 int(ev.get("bar_open_ms") or 0),
             )
-        elif kind == "INVALIDATED":
+        elif kind in {"INVALIDATED", "STOP_LOSS", "TAKE_PROFIT"}:
             key = (
                 kind,
                 str(ev.get("setup_id") or ""),
@@ -1108,6 +1113,49 @@ def _append_invalidated_event(
             "origin_price": invalidation_price,
             "invalidation_price": invalidation_price,
             "mark_price": invalidation_price,
+        }
+    )
+
+
+def _append_trade_exit_event(
+    events_out: list[dict[str, Any]] | None,
+    *,
+    setup_id: str,
+    symbol: str,
+    setup_type: str,
+    direction: str,
+    timeframe: str,
+    setup_htf: str | None = None,
+    bar_open_ms: int,
+    exit_price: float,
+    exit_reason: str,
+) -> None:
+    if events_out is None:
+        return
+    reason = str(exit_reason).lower()
+    if reason in {"sl", "both_hit_same_bar_sl_first"}:
+        kind = "STOP_LOSS"
+        subkind = "SL"
+    elif reason in {"tp", "both_hit_same_bar_tp_first"}:
+        kind = "TAKE_PROFIT"
+        subkind = "TP"
+    else:
+        return
+    events_out.append(
+        {
+            "kind": kind,
+            "subkind": subkind,
+            "setup_id": setup_id,
+            "symbol": symbol,
+            "setup_type": setup_type,
+            "direction": direction,
+            "htf": timeframe,
+            "setup_htf": setup_htf or timeframe,
+            "bar_open_ms": bar_open_ms,
+            "exit_price": float(exit_price),
+            "exit_reason": exit_reason,
+            "mark_price": float(exit_price),
+            "after_entry": True,
         }
     )
 
@@ -1670,6 +1718,12 @@ async def run_history_replay(
                                     "impulse_leg_end_open_ms": event.payload.get(
                                         "impulse_leg_end_open_ms"
                                     ),
+                                    "impulse_start_price": event.payload.get(
+                                        "impulse_start_price"
+                                    ),
+                                    "impulse_end_price": event.payload.get(
+                                        "impulse_end_price"
+                                    ),
                                     "structure_break_key": event.payload.get(
                                         "structure_break_key"
                                     ),
@@ -1820,6 +1874,12 @@ async def run_history_replay(
                             ),
                             "impulse_leg_end_open_ms": event.payload.get(
                                 "impulse_leg_end_open_ms"
+                            ),
+                            "impulse_start_price": event.payload.get(
+                                "impulse_start_price"
+                            ),
+                            "impulse_end_price": event.payload.get(
+                                "impulse_end_price"
                             ),
                             "structure_break_key": event.payload.get(
                                 "structure_break_key"
@@ -2353,6 +2413,21 @@ async def run_history_replay(
                 exit_reason=reason,
             )
             closed_trades.append(ClosedTrade.from_result(result))
+            _append_trade_exit_event(
+                events_out,
+                setup_id=position.setup_id,
+                symbol=position.symbol,
+                setup_type=position.setup_type,
+                direction=position.direction,
+                timeframe=position.tf,
+                setup_htf=next(
+                    (setup.htf for setup in setups if setup.id == position.setup_id),
+                    None,
+                ),
+                bar_open_ms=int(row["open_time"]),
+                exit_price=result.exit_price,
+                exit_reason=reason,
+            )
             for setup in setups:
                 if setup.id == position.setup_id and setup.state == "ARMED":
                     setup.state = "INVALIDATED" if result.realized_r < 0 else "CONFIRMED"
@@ -2461,6 +2536,25 @@ async def run_history_replay(
                     mfe_r=position.mfe_r,
                     fib_depth=max(position.filled_fibs) if position.filled_fibs else None,
                 )
+            )
+            _append_trade_exit_event(
+                events_out,
+                setup_id=position.setup_id,
+                symbol=position.symbol,
+                setup_type=position.setup_type,
+                direction=position.direction,
+                timeframe=position.tf,
+                setup_htf=next(
+                    (setup.htf for setup in setups if setup.id == position.setup_id),
+                    None,
+                ),
+                bar_open_ms=int(row["open_time"]),
+                exit_price=exit_price,
+                exit_reason=(
+                    "both_hit_same_bar_sl_first"
+                    if hit_sl and hit_tp
+                    else ("sl" if hit_sl else "tp")
+                ),
             )
             del fib_positions[setup_id]
             for setup in setups:

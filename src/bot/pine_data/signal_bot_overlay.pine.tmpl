@@ -1,10 +1,5 @@
 //@version=5
-indicator("Signal Bot Overlay", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
-
-// Длина горизонтального продолжения fib-уровней импульса вперёд от пика, в барах
-// текущего TF графика (отдельно от tf_ms сетапа на сетке).
-fib_extend_bars = input.int(40, "IMPULSE fib forward bars", minval=5, maxval=200)
-show_impulses = input.bool(false, "Show IMPULSE")
+indicator("Signal Bot Signals", overlay=true, max_labels_count=500)
 
 var int[]    sig_t       = array.new_int(0)
 var int[]    sig_t2      = array.new_int(0)
@@ -16,77 +11,95 @@ var float[]  sig_ote_lo  = array.new_float(0)
 var float[]  sig_ote_hi  = array.new_float(0)
 var float[]  sig_sl      = array.new_float(0)
 var float[]  sig_tp      = array.new_float(0)
+var int[]    sig_imp_start_t     = array.new_int(0)
+var int[]    sig_imp_end_t       = array.new_int(0)
+var float[]  sig_imp_start_price = array.new_float(0)
+var float[]  sig_imp_end_price   = array.new_float(0)
 
 if barstate.isfirst
 {{PUSH_BLOCK}}
 
-color cLong = color.new(color.teal, 0)
-color cShort = color.new(color.red, 0)
-
-f_dir_col(dir) =>
-    dir == "LONG" ? cLong : cShort
-
 if barstate.islast
-    tf_ms = int(timeframe.in_seconds() * 1000)
     n = array.size(sig_t)
-    n := math.min(n, array.size(sig_t2))
     n := math.min(n, array.size(sig_price))
     n := math.min(n, array.size(sig_kind))
-    n := math.min(n, array.size(sig_subkind))
     n := math.min(n, array.size(sig_dir))
-    n := math.min(n, array.size(sig_ote_lo))
-    n := math.min(n, array.size(sig_ote_hi))
-    n := math.min(n, array.size(sig_sl))
-    n := math.min(n, array.size(sig_tp))
+    n := math.min(n, array.size(sig_imp_start_t))
+    n := math.min(n, array.size(sig_imp_end_t))
+    n := math.min(n, array.size(sig_imp_start_price))
+    n := math.min(n, array.size(sig_imp_end_price))
     last_i = n > 0 ? n - 1 : na
     for i = 0 to last_i
         t_ms = array.get(sig_t, i)
-        t2_ms = array.get(sig_t2, i)
         k = array.get(sig_kind, i)
-        sk = array.get(sig_subkind, i)
         d = array.get(sig_dir, i)
         p = array.get(sig_price, i)
-        lo = array.get(sig_ote_lo, i)
-        hi = array.get(sig_ote_hi, i)
-        sl = array.get(sig_sl, i)
-        tp = array.get(sig_tp, i)
-        col = f_dir_col(d)
+        imp_start_t = array.get(sig_imp_start_t, i)
+        imp_end_t = array.get(sig_imp_end_t, i)
+        imp_start_p = array.get(sig_imp_start_price, i)
+        imp_end_p = array.get(sig_imp_end_price, i)
+
+        entry_style = d == "LONG" ? label.style_label_up : label.style_label_down
+        exit_style = d == "LONG" ? label.style_label_down : label.style_label_up
+        signal_color = d == "LONG" ? color.teal : color.orange
+
         if k == "PREPARE"
-            // PREPARE-лейбл рисуется на баре, который первым коснулся 0.5-ретрейса импульса.
-            // Прямоугольник OTE не рисуем — триггер это единый уровень, дальше пользователь
-            // смотрит LTF-паттерн на вход и решает сам.
-            prep_style = d == "LONG" ? label.style_label_up : label.style_label_down
-            label.new(t_ms, p, text="P " + d, xloc=xloc.bar_time, style=prep_style, color=col, textcolor=color.white, size=size.small)
-            // Структурная подсказка на баре отката к 0.5:
-            // SHORT -> LH, LONG -> HL.
-            corr_txt = d == "SHORT" ? "LH" : "HL"
-            corr_style = d == "SHORT" ? label.style_label_down : label.style_label_up
-            label.new(t_ms + tf_ms / 4, p, text=corr_txt, xloc=xloc.bar_time, style=corr_style, color=color.new(color.gray, 80), textcolor=color.white, size=size.tiny)
+            label.new(
+                 t_ms,
+                 p,
+                 text="PREPARE " + d,
+                 xloc=xloc.bar_time,
+                 style=entry_style,
+                 color=color.new(signal_color, 0),
+                 textcolor=color.white,
+                 size=size.small)
+            if imp_start_t > 0 and not na(imp_start_p)
+                label.new(
+                     imp_start_t,
+                     imp_start_p,
+                     text="IMP START",
+                     xloc=xloc.bar_time,
+                     style=entry_style,
+                     color=color.new(color.gray, 30),
+                     textcolor=color.white,
+                     size=size.tiny)
+            if imp_end_t > 0 and not na(imp_end_p)
+                label.new(
+                     imp_end_t,
+                     imp_end_p,
+                     text="IMP END",
+                     xloc=xloc.bar_time,
+                     style=exit_style,
+                     color=color.new(signal_color, 35),
+                     textcolor=color.white,
+                     size=size.tiny)
         else if k == "ENTRY"
-            label.new(t_ms, p, text="E " + d, xloc=xloc.bar_time, style=label.style_label_down, color=color.new(col, 20), textcolor=color.white, size=size.normal)
-            if not na(sl)
-                line.new(t_ms, sl, t_ms + tf_ms * 24, sl, xloc=xloc.bar_time, color=color.red, width=2)
-            if not na(tp)
-                line.new(t_ms, tp, t_ms + tf_ms * 24, tp, xloc=xloc.bar_time, color=color.green, width=2)
-        else if k == "INVALIDATED"
-            label.new(t_ms, p, text="X", xloc=xloc.bar_time, style=label.style_xcross, color=color.gray, size=size.tiny)
-        else if k == "STRUCTURE"
-            line_start = t2_ms > 0 ? t2_ms : t_ms
-            line.new(line_start, p, t_ms, p, xloc=xloc.bar_time, color=col, width=2, style=sk == "BOS" ? line.style_solid : line.style_dashed)
-            label.new(t_ms, p, text=sk + " " + d, xloc=xloc.bar_time, style=d == "LONG" ? label.style_label_up : label.style_label_down, color=color.new(col, 30), textcolor=color.white, size=size.small)
-        else if k == "IMPULSE" and show_impulses
-            // IMPULSE-нога Pine-стека: HL→HH (LONG) или LH→LL (SHORT).
-            // (t_ms, p) = start_price (HL/LH), (t2_ms, lo) = end_price (HH/LL).
-            // Цвет ноги мягче, чем у структуры, чтобы не сливалось с горизонталью BOS/CHoCH.
-            line.new(t_ms, p, t2_ms, lo, xloc=xloc.bar_time, color=color.new(col, 40), width=2, style=line.style_solid)
-            // 0.5 fib-линия (Pine рисует ровно её для каждого HL→HH / LH→LL leg'а):
-            // продолжаем от пика ноги вправо до fib_extend_bars баров.
-            level_50 = (p + lo) / 2
-            extend_to = t2_ms + tf_ms * fib_extend_bars
-            line.new(t2_ms, level_50, extend_to, level_50, xloc=xloc.bar_time, color=color.new(color.yellow, 40), width=1, style=line.style_dashed)
-        else if k == "PIVOT"
-            // PIVOT-метка как в индикаторе Leviathan: HH/LH над хаем (label_down),
-            // HL/LL под лоу (label_up). sk = HH/LH/HL/LL.
-            // d держит "HIGH"/"LOW" — выбираем style и якорь.
-            piv_style = d == "HIGH" ? label.style_label_down : label.style_label_up
-            label.new(t_ms, p, text=sk, xloc=xloc.bar_time, style=piv_style, color=color.new(color.gray, 80), textcolor=color.white, size=size.tiny)
+            label.new(
+                 t_ms,
+                 p,
+                 text="ENTRY " + d,
+                 xloc=xloc.bar_time,
+                 style=entry_style,
+                 color=color.new(color.blue, 0),
+                 textcolor=color.white,
+                 size=size.small)
+        else if k == "TAKE_PROFIT"
+            label.new(
+                 t_ms,
+                 p,
+                 text="TP " + d,
+                 xloc=xloc.bar_time,
+                 style=exit_style,
+                 color=color.new(color.green, 0),
+                 textcolor=color.white,
+                 size=size.small)
+        else if k == "STOP_LOSS"
+            label.new(
+                 t_ms,
+                 p,
+                 text="SL " + d,
+                 xloc=xloc.bar_time,
+                 style=entry_style,
+                 color=color.new(color.red, 0),
+                 textcolor=color.white,
+                 size=size.small)
