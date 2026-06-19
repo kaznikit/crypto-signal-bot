@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from bot.storage.models import Base, BotState, Setup, Signal, Trade
@@ -227,6 +227,32 @@ class Repository:
     def load_open_trades(self) -> list[Trade]:
         with self._session_factory() as session:
             return list(session.scalars(select(Trade).where(Trade.status == "OPEN")).all())
+
+    def load_closed_trades(
+        self,
+        *,
+        exit_from_ms: int | None = None,
+        exit_to_ms: int | None = None,
+    ) -> list[Trade]:
+        stmt = select(Trade).where(Trade.status == "CLOSED", Trade.exit_time.is_not(None))
+        if exit_from_ms is not None:
+            stmt = stmt.where(Trade.exit_time >= int(exit_from_ms))
+        if exit_to_ms is not None:
+            stmt = stmt.where(Trade.exit_time < int(exit_to_ms))
+        stmt = stmt.order_by(Trade.exit_time, Trade.id)
+        with self._session_factory() as session:
+            return list(session.scalars(stmt).all())
+
+    def closed_trade_time_bounds(self) -> tuple[int | None, int | None]:
+        stmt = select(func.min(Trade.exit_time), func.max(Trade.exit_time)).where(
+            Trade.status == "CLOSED",
+            Trade.exit_time.is_not(None),
+        )
+        with self._session_factory() as session:
+            row = session.execute(stmt).one()
+            start_ms = int(row[0]) if row[0] is not None else None
+            end_ms = int(row[1]) if row[1] is not None else None
+            return start_ms, end_ms
 
     def load_active_setups(self) -> list[Setup]:
         with self._session_factory() as session:

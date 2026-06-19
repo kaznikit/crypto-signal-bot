@@ -75,3 +75,66 @@ def test_repository_persists_trade_lifecycle(tmp_path) -> None:
     assert trade is not None
     assert trade.status == "CLOSED"
     assert trade.realized_r == pytest.approx(-1.0)
+
+
+def test_repository_loads_closed_trades_for_stats_window(tmp_path) -> None:
+    repo = Repository(f"sqlite:///{tmp_path / 'bot.db'}")
+    repo.create_schema()
+    now = datetime.now(UTC)
+    setup_1 = build_setup(
+        setup_id="setup-1",
+        symbol="BTCUSDT",
+        setup_type=SetupType.CONTINUATION,
+        direction="LONG",
+        htf="1H",
+        ltf_expected="5M",
+        origin_price=100.0,
+        ote_low=95.0,
+        ote_high=100.0,
+        invalidation_price=90.0,
+        ttl_hours=1,
+        entry_target_price=120.0,
+    )
+    setup_2 = build_setup(
+        setup_id="setup-2",
+        symbol="ETHUSDT",
+        setup_type=SetupType.REVERSAL,
+        direction="SHORT",
+        htf="4H",
+        ltf_expected="5M",
+        origin_price=100.0,
+        ote_low=95.0,
+        ote_high=100.0,
+        invalidation_price=110.0,
+        ttl_hours=1,
+        entry_target_price=80.0,
+    )
+
+    repo.upsert_trade_entry(
+        setup=setup_1,
+        payload={"entry": 100.0, "sl": 90.0, "tp": 120.0, "risk_fraction": 1.0},
+        entry_time=1_000,
+        at=now,
+    )
+    repo.close_trade(
+        setup_id=setup_1.id,
+        exit_time=2_000,
+        exit_price=120.0,
+        exit_reason="TP",
+        at=now,
+    )
+    repo.upsert_trade_entry(
+        setup=setup_2,
+        payload={"entry": 100.0, "sl": 110.0, "tp": 80.0, "risk_fraction": 1.0},
+        entry_time=3_000,
+        at=now,
+    )
+
+    assert repo.closed_trade_time_bounds() == (2_000, 2_000)
+    closed_trade_ids = [
+        trade.id
+        for trade in repo.load_closed_trades(exit_from_ms=1_500, exit_to_ms=2_500)
+    ]
+    assert closed_trade_ids == [setup_1.id]
+    assert repo.load_closed_trades(exit_from_ms=2_500) == []
+    assert [trade.id for trade in repo.load_open_trades()] == [setup_2.id]

@@ -498,6 +498,25 @@ signal-bot-export-pine --symbol BTCUSDT --tf 4H --include-liberal --out btc_all.
 
 Если нужен обратный канал TV → бот, делайте отдельный webhook-эндпоинт; в этом боте не реализовано.
 
+### Telegram-команда статистики сделок
+
+Бот отвечает на `/trade_stats` в настроенных Telegram-чатах (`TG_CHAT_ID`,
+`TG_PREPARE_CHAT_ID`, `TG_ENTRY_CHAT_ID`, `TG_PAPER_CHAT_ID`). Без аргументов
+команда считает всю доступную историю закрытых сделок в `bot.db`; если БД
+периодически очищается, отчёт автоматически ограничен тем диапазоном, который
+ещё хранится в таблице `trades`.
+
+```text
+/trade_stats
+/trade_stats 7d
+/trade_stats 7д
+/trade_stats today
+/trade_stats 2026-06-01
+/trade_stats 2026-06-01 2026-06-19
+```
+
+Период считается по `exit_time` закрытой сделки. Даты трактуются как UTC.
+
 ## Запуск на VPS (пошагово)
 
 Предполагается **Ubuntu 22.04**, пользователь с `sudo`.

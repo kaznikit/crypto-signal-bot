@@ -7,6 +7,10 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any
 
+from aiogram import Dispatcher
+from aiogram.filters import Command
+from aiogram.types import Message
+
 from bot.analyzer.continuation import detect_continuation_prepare
 from bot.analyzer.entry_ltf import (
     cascade_sequence_for_htf,
@@ -68,6 +72,13 @@ from bot.prepare_stats import (
 from bot.scheduler import TimeframeScheduler
 from bot.storage.models import Signal, SignalKind
 from bot.storage.repo import Repository
+from bot.trade_stats import (
+    TradeStatsParseError,
+    format_trade_stats_report,
+    parse_trade_stats_period,
+    summarize_trade_stats,
+    trade_stats_usage,
+)
 from bot.util.logging import setup_logging
 from bot.util.time import ensure_utc, utcnow
 
@@ -187,6 +198,16 @@ class SignalBotApp:
             paper_chat_id=self._paper_chat_id,
             route_paper_mode_to_paper_chat=self._cfg.telegram.route_paper_mode_to_paper_chat,
         )
+        self._command_chat_ids = {
+            chat_id
+            for chat_id in (
+                self._env.telegram_chat_id(self._cfg.telegram.fallback_chat_id_env),
+                self._env.telegram_chat_id(self._cfg.telegram.prepare_chat_id_env),
+                self._env.telegram_chat_id(self._cfg.telegram.entry_chat_id_env),
+                self._paper_chat_id,
+            )
+            if chat_id
+        }
         self._scheduler = TimeframeScheduler()
         self._latest_4h_series: dict[str, Any] = {}
 
@@ -273,8 +294,49 @@ class SignalBotApp:
     async def run(self) -> None:
         self._scheduler.add_tick_job(self.tick)
         self._scheduler.start()
+        await asyncio.gather(self._run_command_polling(), self._sleep_forever())
+
+    async def _sleep_forever(self) -> None:
         while True:
             await asyncio.sleep(3600)
+
+    async def _run_command_polling(self) -> None:
+        dispatcher = Dispatcher()
+        dispatcher.message.register(
+            self._handle_trade_stats_command,
+            Command("trade_stats", "stats", "trades"),
+        )
+        logger.info("Telegram command polling started")
+        await dispatcher.start_polling(self._notifier.bot, allowed_updates=["message"])
+
+    async def _handle_trade_stats_command(self, message: Message) -> None:
+        chat_id = str(message.chat.id)
+        if self._command_chat_ids and chat_id not in self._command_chat_ids:
+            logger.warning("Unauthorized trade stats command ignored | chat_id=%s", chat_id)
+            return
+
+        text = message.text or ""
+        parts = text.strip().split(maxsplit=1)
+        args = parts[1] if len(parts) > 1 else ""
+        try:
+            period = parse_trade_stats_period(args)
+        except TradeStatsParseError as exc:
+            await message.answer(f"{exc}\n\n{trade_stats_usage()}")
+            return
+
+        trades = self._repo.load_closed_trades(
+            exit_from_ms=period.start_ms,
+            exit_to_ms=period.end_ms,
+        )
+        available_start_ms, available_end_ms = self._repo.closed_trade_time_bounds()
+        summary = summarize_trade_stats(
+            trades,
+            period=period,
+            available_start_ms=available_start_ms,
+            available_end_ms=available_end_ms,
+            open_count=len(self._repo.load_open_trades()),
+        )
+        await message.answer(format_trade_stats_report(summary))
 
     async def tick(self) -> None:
         await self._maybe_process_entry_stats()

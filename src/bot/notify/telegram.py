@@ -45,6 +45,10 @@ class TelegramNotifier:
         self._paper_chat_id = paper_chat_id
         self._route_paper_mode_to_paper_chat = route_paper_mode_to_paper_chat
 
+    @property
+    def bot(self) -> Bot:
+        return self._bot
+
     def _target_chat(
         self,
         paper_mode: bool,
